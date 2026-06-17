@@ -1749,6 +1749,12 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
 
     aViewData.SetPixOffsetY(eWhich, nNewOffset);
 
+    // Refresh overlay objects (cursor, selection, auto-fill handle, etc.) to the new
+    // pixel-offset position BEFORE painting.  Without this, PaintImmediately() would
+    // render the draw layer with stale overlay positions, producing a one-frame cursor
+    // "ghost" that lags the smoothly scrolled grid content by nPixelDelta pixels.
+    UpdateAllOverlays();
+
     // Full invalidate + synchronous paint.
     // ScrollPixel blit cannot be used here: cells render in VCL's mm100 coordinate system
     // whose origin can only approximate pixel positions.  After a pixel-granular blit the
@@ -1775,10 +1781,11 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
             pGridWin[SC_SPLIT_TOPRIGHT]->PaintImmediately();
         }
     }
-    // Row bar and outline are narrow and fast; queue asynchronously to avoid
-    // extra GPU synchronisation points in the scroll hot path.
     if (pRowBar[eWhich])
+    {
         pRowBar[eWhich]->Invalidate();
+        pRowBar[eWhich]->PaintImmediately();
+    }
     if (pRowOutline[eWhich])
         pRowOutline[eWhich]->Invalidate();
 
@@ -1881,6 +1888,9 @@ void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
 
     aViewData.SetPixOffsetX(eWhich, nNewOffset);
 
+    // Refresh overlays to the new pixel-offset position before painting (same reason as SmoothScrollY).
+    UpdateAllOverlays();
+
     if (eWhich == SC_SPLIT_LEFT)
     {
         pGridWin[SC_SPLIT_BOTTOMLEFT]->Invalidate();
@@ -1902,7 +1912,10 @@ void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
         }
     }
     if (pColBar[eWhich])
+    {
         pColBar[eWhich]->Invalidate();
+        pColBar[eWhich]->PaintImmediately();
+    }
     if (pColOutline[eWhich])
         pColOutline[eWhich]->Invalidate();
 

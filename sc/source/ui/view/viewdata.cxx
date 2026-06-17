@@ -2861,7 +2861,9 @@ SCCOL ScViewData::CellsAtX( SCCOL nPosX, SCCOL nDir, ScHSplitPos eWhichX, tools:
         const_cast<ScViewData*>(this)->aScrSize.setWidth( pView->GetGridWidth(eWhichX) );
 
     SCCOL  nX;
-    tools::Long  nScrPosX = 0;
+    // When counting from the current view left, start from the sub-cell pixel offset
+    // so a partially-scrolled leftmost column doesn't steal extra pixel budget from columns to the right.
+    tools::Long  nScrPosX = (nDir == 1 && nPosX == GetPosX(eWhichX)) ? GetPixOffsetX(eWhichX) : 0;
     if (nScrSizeX == SC_SIZE_NONE) nScrSizeX = aScrSize.Width();
 
     if (nDir==1)
@@ -2911,7 +2913,9 @@ SCROW ScViewData::CellsAtY( SCROW nPosY, SCROW nDir, ScVSplitPos eWhichY, tools:
     {
         // forward
         nY = nPosY;
-        tools::Long nScrPosY = 0;
+        // When counting from the current view top, start from the sub-cell pixel offset
+        // so a partially-scrolled top row doesn't steal extra pixel budget from rows below.
+        tools::Long nScrPosY = (nPosY == GetPosY(eWhichY)) ? GetPixOffsetY(eWhichY) : 0;
         AddPixelsWhile(nScrPosY, nScrSizeY, nY, mrDoc.MaxRow(), nPPTY, &mrDoc, CurrentTabForData());
         // Original loop ended on last evaluated +1 or if that was MaxRow even on MaxRow+2.
         nY += (nY == mrDoc.MaxRow() ? 2 : 1);

@@ -54,6 +54,7 @@
 #include <comphelper/lok.hxx>
 #include <sfx2/lokhelper.hxx>
 #include <osl/diagnose.h>
+#include <officecfg/Office/Calc.hxx>
 
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -1032,9 +1033,18 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
 
             if (nScrollLines == COMMAND_WHEEL_PAGESCROLL)
             {
-                tools::Long nPagePx = aViewData.GetView()->GetGridHeight(eVPos);
-                SAL_INFO("sc.smooth", "  -> PageScroll path, nPagePx=" << nPagePx);
-                SmoothScrollY(nNotchDelta > 0 ? nPagePx : -nPagePx, eVPos);
+                if (pData->IsHorz())
+                {
+                    tools::Long nPageWidPx = aViewData.GetView()->GetGridWidth(eHPos);
+                    SAL_INFO("sc.smooth", "  -> PageScroll-horiz path, nPageWidPx=" << nPageWidPx);
+                    SmoothScrollX(nNotchDelta > 0 ? nPageWidPx : -nPageWidPx, eHPos);
+                }
+                else
+                {
+                    tools::Long nPagePx = aViewData.GetView()->GetGridHeight(eVPos);
+                    SAL_INFO("sc.smooth", "  -> PageScroll path, nPagePx=" << nPagePx);
+                    SmoothScrollY(nNotchDelta > 0 ? nPagePx : -nPagePx, eVPos);
+                }
             }
             else
             {
@@ -1641,6 +1651,13 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
         ScrollY(nPixelDelta > 0 ? 1 : -1, eWhich);
         return;
     }
+    // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
+    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
+    {
+        SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback");
+        ScrollY(nPixelDelta > 0 ? 1 : -1, eWhich);
+        return;
+    }
     // The frozen top pane does not scroll.
     if (aViewData.GetVSplitMode() == SC_SPLIT_FIX && eWhich == SC_SPLIT_TOP)
     {
@@ -1774,6 +1791,12 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
 void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
 {
     if (comphelper::LibreOfficeKit::isActive())
+    {
+        ScrollX(nPixelDelta > 0 ? 1 : -1, eWhich);
+        return;
+    }
+    // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
+    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
     {
         ScrollX(nPixelDelta > 0 ? 1 : -1, eWhich);
         return;

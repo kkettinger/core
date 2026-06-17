@@ -82,6 +82,8 @@ class ScTpContentOptions : public SfxTabPage
     std::unique_ptr<weld::Widget> m_xOutlineImg;
     std::unique_ptr<weld::CheckButton> m_xSummaryCB;
     std::unique_ptr<weld::Widget> m_xSummaryImg;
+    std::unique_ptr<weld::CheckButton> m_xSmoothScrollCB;
+    std::unique_ptr<weld::Widget> m_xSmoothScrollImg;
     std::unique_ptr<weld::RadioButton> m_xThemedCursorRB;
     std::unique_ptr<weld::RadioButton> m_xSystemCursorRB;
     std::unique_ptr<weld::Widget> m_xCursorImg;

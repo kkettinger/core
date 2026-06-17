@@ -84,6 +84,8 @@ ScTpContentOptions::ScTpContentOptions(weld::Container* pPage, weld::DialogContr
     , m_xOutlineImg(m_xBuilder->weld_widget(u"lockoutline"_ustr))
     , m_xSummaryCB(m_xBuilder->weld_check_button(u"cbSummary"_ustr))
     , m_xSummaryImg(m_xBuilder->weld_widget(u"lockcbSummary"_ustr))
+    , m_xSmoothScrollCB(m_xBuilder->weld_check_button(u"smoothscroll"_ustr))
+    , m_xSmoothScrollImg(m_xBuilder->weld_widget(u"locksmoothscroll"_ustr))
     , m_xThemedCursorRB(m_xBuilder->weld_radio_button(u"rbThemedCursor"_ustr))
     , m_xSystemCursorRB(m_xBuilder->weld_radio_button(u"rbSystemCursor"_ustr))
     , m_xCursorImg(m_xBuilder->weld_widget(u"lockCursor"_ustr))
@@ -141,9 +143,9 @@ OUString ScTpContentOptions::GetAllStrings()
     }
 
     OUString checkButton[]
-        = { u"formula"_ustr,   u"nil"_ustr,          u"annot"_ustr,   u"formulamark"_ustr, u"value"_ustr,  u"anchor"_ustr,
-            u"rangefind"_ustr, u"rowcolheader"_ustr, u"hscroll"_ustr, u"vscroll"_ustr,     u"tblreg"_ustr, u"outline"_ustr,
-            u"cbSummary"_ustr, u"synczoom"_ustr,     u"break"_ustr,   u"guideline"_ustr };
+        = { u"formula"_ustr,      u"nil"_ustr,          u"annot"_ustr,   u"formulamark"_ustr, u"value"_ustr,  u"anchor"_ustr,
+            u"rangefind"_ustr,    u"rowcolheader"_ustr, u"hscroll"_ustr, u"vscroll"_ustr,     u"tblreg"_ustr, u"outline"_ustr,
+            u"cbSummary"_ustr,    u"synczoom"_ustr,     u"break"_ustr,   u"guideline"_ustr,   u"smoothscroll"_ustr };
 
     for (const auto& check : checkButton)
     {
@@ -205,6 +207,13 @@ bool    ScTpContentOptions::FillItemSet( SfxItemSet* rCoreSet )
         pChange->commit();
         bRet = true;
     }
+    if (m_xSmoothScrollCB->get_state_changed_from_saved())
+    {
+        auto pChange(comphelper::ConfigurationChanges::create());
+        officecfg::Office::Calc::Content::Display::SmoothScroll::set(m_xSmoothScrollCB->get_active(), pChange);
+        pChange->commit();
+        bRet = true;
+    }
 
     return bRet;
 }
@@ -223,6 +232,7 @@ void    ScTpContentOptions::Reset( const SfxItemSet* rCoreSet )
     m_xValueCB   ->set_active(m_xLocalOptions->GetOption(sc::ViewOption::SYNTAX));
     m_xColRowHighCB->set_active(officecfg::Office::Calc::Content::Display::ColumnRowHighlighting::get());
     m_xEditCellBgHighCB->set_active(officecfg::Office::Calc::Content::Display::EditCellBackgroundHighlighting::get());
+    m_xSmoothScrollCB->set_active(officecfg::Office::Calc::Content::Display::SmoothScroll::get());
     m_xAnchorCB  ->set_active(m_xLocalOptions->GetOption(sc::ViewOption::ANCHOR));
 
     m_xObjGrfLB  ->set_active( static_cast<sal_uInt16>(m_xLocalOptions->GetObjMode(sc::ViewObjectType::OLE)) );
@@ -343,6 +353,10 @@ void    ScTpContentOptions::Reset( const SfxItemSet* rCoreSet )
     m_xSummaryCB->set_sensitive(!bReadOnly);
     m_xSummaryImg->set_visible(bReadOnly);
 
+    bReadOnly = officecfg::Office::Calc::Content::Display::SmoothScroll::isReadOnly();
+    m_xSmoothScrollCB->set_sensitive(!bReadOnly);
+    m_xSmoothScrollImg->set_visible(bReadOnly);
+
     bReadOnly = officecfg::Office::Calc::Layout::Window::ThemedCursor::isReadOnly();
     m_xThemedCursorRB->set_sensitive(!bReadOnly);
     m_xSystemCursorRB->set_sensitive(!bReadOnly);
@@ -359,6 +373,7 @@ void    ScTpContentOptions::Reset( const SfxItemSet* rCoreSet )
     m_xValueCB->save_state();
     m_xColRowHighCB->save_state();
     m_xEditCellBgHighCB->save_state();
+    m_xSmoothScrollCB->save_state();
     m_xAnchorCB->save_state();
     m_xObjGrfLB->save_value();
     m_xDiagramLB->save_value();

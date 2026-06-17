@@ -420,6 +420,9 @@ void ScGridWindow::Paint( vcl::RenderContext& /*rRenderContext*/, const tools::R
         ++nX1;
         nScrX += ScViewData::ToPixel( rDoc.GetColWidth( nX1, nTab ), nPPTX );
     }
+    // Adjust for sub-cell horizontal offset so the nX2 range correctly covers the
+    // rightmost partially-visible column when the leftmost column is partially scrolled.
+    nScrX += mrViewData.GetPixOffsetX(eHWhich);  // nPixOffsetX ≤ 0
     SCCOL nX2 = nX1;
     while ( nScrX <= aMirroredPixel.Right() && nX2 < rDoc.MaxCol() )
     {

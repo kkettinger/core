@@ -214,9 +214,6 @@ private:
 
     double              mfLastZoomScale = 0;
     double              mfAccumulatedZoom = 0;
-    tools::Long         mnPendingaHScrollLeftDelta = 0;
-    tools::Long         mnPendingaHScrollRightDelta = 0;
-
     // Smooth scrolling: cumulative pan gesture offsets (for delta computation per Update event)
     double              mfPreviousPanOffsetX = 0.0;
     double              mfPreviousPanOffsetY = 0.0;

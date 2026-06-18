@@ -1789,7 +1789,19 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
     if (pRowOutline[eWhich])
         pRowOutline[eWhich]->Invalidate();
 
-    UpdateScrollBars(ROW_HEADER);
+    // During scrollbar drag, skip UpdateScrollBars.  ScrollAdaptor wraps a weld::Scrollbar
+    // (GtkAdjustment).  UpdateScrollBars calls SetScrollBar → adjustment_set_upper(nTotalPxB).
+    // For sheets where nTotalPxB grows as the user scrolls into previously-unvisited rows
+    // (nScrollEndY = max(nUsedY, nPosY) + nVisY + 2), GTK's drag tracking recomputes the
+    // slider pixel position from the new upper bound but its accumulated drag offset does
+    // not reset.  The mismatch causes the visual thumb to jump on every motion event —
+    // the classic drag jitter.  Even on fully populated sheets, adjustment_set_value()
+    // is called with the integer-truncated equivalent of GTK's internal floating-point value,
+    // which may emit a spurious value-changed signal and force a redundant re-entrant
+    // ScrollHdl call.  EndScrollHdl calls UpdateScrollBars() when the drag ends, so the
+    // scrollbar range and thumb are correctly synced at that point.
+    if (!bDragging)
+        UpdateScrollBars(ROW_HEADER);
     ShowAllCursors();
     SetNewVisArea();
     TestHintWindow();
@@ -1919,7 +1931,9 @@ void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
     if (pColOutline[eWhich])
         pColOutline[eWhich]->Invalidate();
 
-    UpdateScrollBars(COLUMN_HEADER);
+    // Same drag-jitter fix as SmoothScrollY: see comment there for the full explanation.
+    if (!bDragging)
+        UpdateScrollBars(COLUMN_HEADER);
     ShowAllCursors();
     SetNewVisArea();
     TestHintWindow();

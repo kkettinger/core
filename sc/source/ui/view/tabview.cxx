@@ -51,6 +51,7 @@
 #include <appoptio.hxx>
 #include <attrib.hxx>
 #include <spellcheckcontext.hxx>
+#include <comphelper/flagguard.hxx>
 #include <comphelper/lok.hxx>
 #include <sfx2/lokhelper.hxx>
 #include <osl/diagnose.h>
@@ -218,7 +219,8 @@ ScTabView::ScTabView( vcl::Window* pParent, ScDocShell& rDocSh, ScTabViewShell* 
     bDrawSelMode( false ),
     bLockPaintBrush( false ),
     bDragging( false ),
-    bBlockNeg( false ),
+    bScrollHandlerActive( false ),
+    bBlockNeg(false),
     bBlockCols( false ),
     bBlockRows( false ),
     mbInlineWithScrollbar( false )
@@ -1213,6 +1215,14 @@ IMPL_LINK_NOARG(ScTabView, EndScrollHdl, const MouseEvent&, bool)
 
 void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
 {
+    // Re-entrancy guard: UpdateScrollBars (called at the end of smooth scroll)
+    // calls SetScrollBar which calls SetVisibleSize → adjustment_set_page_size.
+    // GTK may clamp the value and emit value-changed again synchronously.
+    // That spurious event must not trigger another scroll step.
+    if (bScrollHandlerActive)
+        return;
+    comphelper::FlagRestorationGuard aScrollGuard(bScrollHandlerActive, true);
+
     bool bHoriz = ( pScroll == aHScrollLeft.get() || pScroll == aHScrollRight.get() );
 
     bool bLayoutRTL = bHoriz && aViewData.GetDocument().IsLayoutRTL( aViewData.CurrentTabForData() );

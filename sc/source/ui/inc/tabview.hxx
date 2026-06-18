@@ -212,6 +212,8 @@ private:
     bool                bBlockRows:1;             // are whole rows selected?
     bool                mbInlineWithScrollbar:1;  // should inline with scrollbar?
 
+    bool                bScrollHandlerActive;     // re-entrancy guard for ScrollHdl
+
     double              mfLastZoomScale = 0;
     double              mfAccumulatedZoom = 0;
     // Smooth scrolling: cumulative pan gesture offsets (for delta computation per Update event)

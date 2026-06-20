@@ -1127,8 +1127,15 @@ void ScViewData::RefreshZoom()
 {
     // recalculate zoom-dependent values (only for current sheet)
 
+    double fOldPPTX = nPPTX;
+    double fOldPPTY = nPPTY;
     CalcPPT();
-    RecalcPixPos();
+    // Sub-cell pixel offsets are in screen pixels; they are only stale when
+    // the pixel-per-twip ratio changes (i.e. on a real zoom change).  When
+    // called from a row/column resize there is no PPT change, so preserve the
+    // offsets to avoid snapping the view to a cell boundary.
+    bool bPPTChanged = (nPPTX != fOldPPTX || nPPTY != fOldPPTY);
+    RecalcPixPos(bPPTChanged);
     aScenButSize = Size(0,0);
     aLogicMode.SetScaleX( GetZoomX() );
     aLogicMode.SetScaleY( GetZoomY() );
@@ -3227,14 +3234,15 @@ void ScViewData::SetPosY( ScVSplitPos eWhich, SCROW nNewPosY )
     pThisTab->nPixOffsetY[eWhich] = 0;
 }
 
-void ScViewData::RecalcPixPos()             // after zoom changes
+void ScViewData::RecalcPixPos(bool bResetSubCellOffsets)
 {
+    SCTAB nTab = CurrentTabForData();
     for (sal_uInt16 eWhich=0; eWhich<2; eWhich++)
     {
         tools::Long nPixPosX = 0;
         SCCOL nPosX = pThisTab->nPosX[eWhich];
         for (SCCOL i=0; i<nPosX; i++)
-            nPixPosX -= ToPixel(mrDoc.GetColWidth(i, CurrentTabForData()), nPPTX);
+            nPixPosX -= ToPixel(mrDoc.GetColWidth(i, nTab), nPPTX);
         pThisTab->nPixPosX[eWhich] = nPixPosX;
 
         tools::Long nPixPosY = 0;
@@ -3244,13 +3252,38 @@ void ScViewData::RecalcPixPos()             // after zoom changes
         for (SCROW j=0; j<nPosY; j++)
         {
             if(nLastSameHeightRow < j)
-                nRowHeight = ToPixel(mrDoc.GetRowHeight(j, CurrentTabForData(), nullptr, &nLastSameHeightRow), nPPTY);
+                nRowHeight = ToPixel(mrDoc.GetRowHeight(j, nTab, nullptr, &nLastSameHeightRow), nPPTY);
             nPixPosY -= nRowHeight;
         }
         pThisTab->nPixPosY[eWhich] = nPixPosY;
-        // Reset sub-cell offsets on zoom change so rendering is cell-aligned.
-        pThisTab->nPixOffsetX[eWhich] = 0;
-        pThisTab->nPixOffsetY[eWhich] = 0;
+
+        if (bResetSubCellOffsets)
+        {
+            // Zoom change: pixel offsets are stale, reset to a cell boundary.
+            pThisTab->nPixOffsetX[eWhich] = 0;
+            pThisTab->nPixOffsetY[eWhich] = 0;
+        }
+        else
+        {
+            // Row/column resize (no zoom change): pixel-per-twip is unchanged
+            // so existing sub-cell offsets are still valid.  Clamp in case the
+            // top-row or leftmost-column shrank below the current offset.
+            tools::Long nOffY = pThisTab->nPixOffsetY[eWhich];
+            if (nOffY != 0)
+            {
+                tools::Long nRowPx = ToPixel(
+                    sal::static_int_cast<sal_uInt16>(mrDoc.GetRowHeight(nPosY, nTab)), nPPTY);
+                if (nRowPx <= 0 || -nOffY >= nRowPx)
+                    pThisTab->nPixOffsetY[eWhich] = 0;
+            }
+            tools::Long nOffX = pThisTab->nPixOffsetX[eWhich];
+            if (nOffX != 0)
+            {
+                tools::Long nColPx = ToPixel(mrDoc.GetColWidth(nPosX, nTab), nPPTX);
+                if (nColPx <= 0 || -nOffX >= nColPx)
+                    pThisTab->nPixOffsetX[eWhich] = 0;
+            }
+        }
     }
 }
 

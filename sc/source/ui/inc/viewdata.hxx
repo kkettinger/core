@@ -693,7 +693,7 @@ public:
 
     const Size&     GetScrSize() const              { return aScrSize; }
 
-    void            RecalcPixPos();
+    void            RecalcPixPos(bool bResetSubCellOffsets = true);
     Point           GetPixPos( ScSplitPos eWhich ) const
                     { return Point( pThisTab->nPixPosX[WhichH(eWhich)],
                                     pThisTab->nPixPosY[WhichV(eWhich)] ); }

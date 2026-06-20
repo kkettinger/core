@@ -207,12 +207,11 @@ private:
     bool                bDrawSelMode:1;           // Only select draw objects ?
     bool                bLockPaintBrush:1;        // keep for more than one use?
     bool                bDragging:1;              // for scroll bars
+    bool                bScrollHandlerActive:1;   // re-entrancy guard for ScrollHdl
     bool                bBlockNeg:1;              // is no longer highlighted?
     bool                bBlockCols:1;             // are whole columns selected?
     bool                bBlockRows:1;             // are whole rows selected?
     bool                mbInlineWithScrollbar:1;  // should inline with scrollbar?
-
-    bool                bScrollHandlerActive;     // re-entrancy guard for ScrollHdl
 
     double              mfLastZoomScale = 0;
     double              mfAccumulatedZoom = 0;

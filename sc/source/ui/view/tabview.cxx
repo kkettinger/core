@@ -1050,26 +1050,31 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
             }
             else
             {
+                SCTAB nTabScrl = aViewData.CurrentTabForData();
                 if (pData->IsHorz())
                 {
-                    // Use a fixed pixel-per-line value so the total is not an
-                    // exact multiple of the column width (which would mean zero
-                    // sub-cell offset and no visible smooth-scroll effect).
-                    constexpr tools::Long nFixedLinePx = 40;
+                    // Use the current leftmost column's width as the per-line pixel unit.
+                    // This matches the visual expectation that one notch = nScrollLines columns.
+                    SCCOL nLeftCol = aViewData.GetPosX(eHPos);
+                    tools::Long nColPx = std::max(1L, ScViewData::ToPixel(
+                        aViewData.GetDocument().GetColWidth(nLeftCol, nTabScrl),
+                        aViewData.GetPPTX()));
                     SAL_INFO("sc.smooth", "  -> Notch-horiz path, totalPx="
-                        << nNotchDelta * static_cast<tools::Long>(nScrollLines) * nFixedLinePx);
-                    SmoothScrollX(nNotchDelta * static_cast<tools::Long>(nScrollLines) * nFixedLinePx,
+                        << nNotchDelta * static_cast<tools::Long>(nScrollLines) * nColPx);
+                    SmoothScrollX(nNotchDelta * static_cast<tools::Long>(nScrollLines) * nColPx,
                                   eHPos);
                 }
                 else
                 {
-                    // Same: use a fixed 40 px per scroll line instead of the
-                    // actual row height, so the delta is generally not an exact
-                    // multiple of the row height and a sub-cell offset is produced.
-                    constexpr tools::Long nFixedLinePx = 40;
+                    // Use the current topmost row's height as the per-line pixel unit.
+                    // This matches the visual expectation that one notch = nScrollLines rows.
+                    SCROW nTopRow = aViewData.GetPosY(eVPos);
+                    tools::Long nRowPx = std::max(1L, ScViewData::ToPixel(
+                        aViewData.GetDocument().GetRowHeight(nTopRow, nTabScrl),
+                        aViewData.GetPPTY()));
                     SAL_INFO("sc.smooth", "  -> Notch-vert path, totalPx="
-                        << nNotchDelta * static_cast<tools::Long>(nScrollLines) * nFixedLinePx);
-                    SmoothScrollY(nNotchDelta * static_cast<tools::Long>(nScrollLines) * nFixedLinePx,
+                        << nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx);
+                    SmoothScrollY(nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx,
                                   eVPos);
                 }
             }
@@ -1114,11 +1119,20 @@ bool ScTabView::GesturePanCommand(const CommandEvent& rCEvt)
 
     if (pData->meEventType == GestureEventPanType::Update)
     {
+        // mfOffset is a cumulative scalar displacement since Begin.  Separate
+        // mfPreviousPanOffsetX/Y accumulators track the "last seen" value for each
+        // axis.  When the gesture's reported orientation switches mid-gesture (e.g. a
+        // diagonal swipe starts as Vertical then becomes Horizontal), the stale
+        // accumulator for the newly-active axis would compute an erroneously large
+        // delta equal to the full displacement accumulated during the previous axis.
+        // Keeping both accumulators at the current mfOffset on every Update event
+        // prevents that jump: the first event on the new axis sees delta = 0.
         if (pData->meOrientation == PanningOrientation::Vertical)
         {
             // mfOffset is the cumulative displacement since Begin; positive = finger moved down.
             tools::Long nDelta = static_cast<tools::Long>(pData->mfOffset - mfPreviousPanOffsetY);
             mfPreviousPanOffsetY = pData->mfOffset;
+            mfPreviousPanOffsetX = pData->mfOffset;  // keep in sync; see comment above
             if (nDelta != 0)
                 SmoothScrollY(-nDelta, eVPos);
         }
@@ -1126,6 +1140,7 @@ bool ScTabView::GesturePanCommand(const CommandEvent& rCEvt)
         {
             tools::Long nDelta = static_cast<tools::Long>(pData->mfOffset - mfPreviousPanOffsetX);
             mfPreviousPanOffsetX = pData->mfOffset;
+            mfPreviousPanOffsetY = pData->mfOffset;  // keep in sync; see comment above
             if (nDelta != 0)
                 SmoothScrollX(-nDelta, eHPos);
         }
@@ -1420,6 +1435,8 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                     tools::Long nNewThumb = GetScrollBarPos(*pScroll, bLayoutRTL);
 
                     // Reconstruct current pixel position from nScrollMin.
+                    // TODO: replace with ScDocument::GetScaledColWidth() once that API exists
+                    // (rows have GetScaledRowHeight; columns currently require an O(N) walk).
                     SCCOL nCurPosX = aViewData.GetPosX(eHPLocal);
                     tools::Long nCurOff = aViewData.GetPixOffsetX(eHPLocal);
                     tools::Long nCurThumb = 0;
@@ -1445,29 +1462,59 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
 
     if (nDelta)
     {
-        // nDelta is in cells (LineUp/Down/Page cases). Convert to pixels and smooth-scroll.
-        // The default: case sets nDelta=0, so only cell-granular scrollbar events reach here.
+        // nDelta is in cells (LineUp/Down/Page cases).
+        // When smooth scrolling is disabled, dispatch directly to the cell-granular
+        // ScrollX/Y so that PageUp/Down moves the correct number of rows/columns.
+        // (The SmoothScrollX/Y fallback only ever scrolls ±1 cell, which is wrong
+        // for page-granular events.)
+        if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
+            || comphelper::LibreOfficeKit::isActive())
+        {
+            if (bHoriz)
+                ScrollX(nDelta, (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT, true);
+            else
+                ScrollY(nDelta, (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM, true);
+            return;
+        }
+
+        // Convert cell-granular delta to pixels using the actual row/column pixel heights
+        // of the rows/columns to be crossed.  Using only the top row's height (nDelta *
+        // topRowPx) produces the wrong scroll distance when rows have variable heights.
         if ( bHoriz )
         {
             ScHSplitPos eHPFinal = (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT;
             SCTAB nTabFinal = aViewData.CurrentTabForData();
-            tools::Long nColPxFinal = std::max(1L, aViewData.ToPixel(
-                aViewData.GetDocument().GetColWidth(aViewData.GetPosX(eHPFinal), nTabFinal),
-                aViewData.GetPPTX()));
-            tools::Long nPixFinal = nDelta * nColPxFinal;
+            ScDocument& rDocFinal = aViewData.GetDocument();
+            SCCOL nPosXFinal = aViewData.GetPosX(eHPFinal);
+            double nPPTXFinal = aViewData.GetPPTX();
+
+            // Sum widths of the columns that will be crossed.
+            SCCOL nColStart = (nDelta > 0) ? nPosXFinal : std::max<SCCOL>(0, nPosXFinal + static_cast<SCCOL>(nDelta));
+            SCCOL nColEnd   = (nDelta > 0) ? std::min<SCCOL>(nPosXFinal + static_cast<SCCOL>(nDelta) - 1, rDocFinal.MaxCol())
+                                           : nPosXFinal - 1;
+            tools::Long nPixFinal = 0;
+            for (SCCOL c = nColStart; c <= nColEnd; ++c)
+                nPixFinal += aViewData.ToPixel(rDocFinal.GetColWidth(c, nTabFinal), nPPTXFinal);
+            nPixFinal = std::max(1L, nPixFinal);
+            if (nDelta < 0) nPixFinal = -nPixFinal;
             if (bLayoutRTL) nPixFinal = -nPixFinal;
-            if (nPixFinal != 0)
-                SmoothScrollX(nPixFinal, eHPFinal);
+            SmoothScrollX(nPixFinal, eHPFinal);
         }
         else
         {
-            // nDelta is in rows (LineUp/Down/Page).
             ScVSplitPos eVPFinal = (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM;
             SCTAB nTabFinal = aViewData.CurrentTabForData();
-            tools::Long nRowPxFinal = std::max(1L, aViewData.ToPixel(
-                aViewData.GetDocument().GetRowHeight(aViewData.GetPosY(eVPFinal), nTabFinal),
-                aViewData.GetPPTY()));
-            tools::Long nPixFinal = nDelta * nRowPxFinal;
+            ScDocument& rDocFinal = aViewData.GetDocument();
+            SCROW nPosYFinal = aViewData.GetPosY(eVPFinal);
+
+            // Sum heights of the rows that will be crossed.
+            SCROW nRowStart = (nDelta > 0) ? nPosYFinal : std::max<SCROW>(0, nPosYFinal + static_cast<SCROW>(nDelta));
+            SCROW nRowEnd   = (nDelta > 0) ? std::min<SCROW>(nPosYFinal + static_cast<SCROW>(nDelta) - 1, rDocFinal.MaxRow())
+                                           : nPosYFinal - 1;
+            tools::Long nPixFinal = 0;
+            if (nRowStart <= nRowEnd)
+                nPixFinal = std::max(1L, rDocFinal.GetScaledRowHeight(nRowStart, nRowEnd, nTabFinal, aViewData.GetPPTY()));
+            if (nDelta < 0) nPixFinal = -nPixFinal;
             if (nPixFinal != 0)
                 SmoothScrollY(nPixFinal, eVPFinal);
         }
@@ -1654,6 +1701,9 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
 {
     SAL_INFO("sc.smooth", "SmoothScrollY: nPixelDelta=" << nPixelDelta << " eWhich=" << static_cast<int>(eWhich));
 
+    if (nPixelDelta == 0)
+        return;
+
     // Fall back to cell-granular scrolling in tiled rendering mode.
     if (comphelper::LibreOfficeKit::isActive())
     {
@@ -1662,6 +1712,8 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
         return;
     }
     // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
+    // (The ScrollHdl cell-count path already bypasses SmoothScrollY when smooth scroll is
+    // off, so we only reach here from wheel/trackpad events in that case.)
     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
     {
         SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback");
@@ -1687,7 +1739,7 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
     // Positive nPixelDelta = scroll down (content moves up), offset becomes more negative.
     tools::Long nNewOffset = nCurrentOffset - nPixelDelta;
 
-    // Track how many pixels we actually crossed row boundaries for the blit.
+    // Track pixel displacement to detect no-ops (row boundaries crossed + offset change).
     tools::Long nRowsCrossedPx = 0;
 
     // Advance rows: nNewOffset went negative past the end of the current top row.
@@ -1740,12 +1792,13 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
             nNewOffset = 0;
     }
 
-    // Actual blit distance (positive = content moves up).
-    // By construction this equals nPixelDelta when unclamped;
-    // when clamped at an edge, it reflects the achievable movement.
-    tools::Long nBlitDelta = nRowsCrossedPx + (nCurrentOffset - nNewOffset);
+    // Total pixel displacement: row boundaries crossed + sub-cell offset change.
+    // Both must be zero (and nPosY unchanged) for the scroll to be a no-op.
+    // Note: there is no ScrollPixel/blit optimisation here; full Invalidate+PaintImmediately
+    // is always used (see the comment in the paint block below for why blit was abandoned).
+    tools::Long nScrolledPx = nRowsCrossedPx + (nCurrentOffset - nNewOffset);
 
-    if (nBlitDelta == 0 && nPosY == aViewData.GetPosY(eWhich))
+    if (nScrolledPx == 0 && nPosY == aViewData.GetPosY(eWhich))
         return;
 
     HideAllCursors();
@@ -1819,6 +1872,9 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
 
 void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
 {
+    if (nPixelDelta == 0)
+        return;
+
     if (comphelper::LibreOfficeKit::isActive())
     {
         ScrollX(nPixelDelta > 0 ? 1 : -1, eWhich);
@@ -1896,9 +1952,9 @@ void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
             nNewOffset = 0;
     }
 
-    tools::Long nBlitDelta = nColsCrossedPx + (nCurrentOffset - nNewOffset);
+    tools::Long nScrolledPx = nColsCrossedPx + (nCurrentOffset - nNewOffset);
 
-    if (nBlitDelta == 0 && nPosX == aViewData.GetPosX(eWhich))
+    if (nScrolledPx == 0 && nPosX == aViewData.GetPosX(eWhich))
         return;
 
     HideAllCursors();

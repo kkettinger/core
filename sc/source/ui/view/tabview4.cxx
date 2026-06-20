@@ -439,13 +439,15 @@ tools::Long ScTabView::GetScrollBarPos( const ScrollAdaptor& rScroll, bool bLayo
 }
 
 //  UpdateScrollBars - set visible area and scroll width of scroll bars
-static tools::Long lcl_UpdateBar( ScrollAdaptor& rScroll, SCCOLROW nSize )        // Size = (complete) cells
+// nPageSizePx: visible page size in pixels (pixel-proportional scrollbars) or cells (legacy).
+// Returns the thumb-position correction that should be applied as an additional scroll step.
+static tools::Long lcl_UpdateBar( ScrollAdaptor& rScroll, tools::Long nPageSizePx )
 {
     tools::Long nOldPos;
     tools::Long nNewPos;
 
     nOldPos = rScroll.GetThumbPos();
-    rScroll.SetPageSize( static_cast<tools::Long>(nSize) );
+    rScroll.SetPageSize( nPageSizePx );
     nNewPos = rScroll.GetThumbPos();
 #ifndef UNX
     rScroll.SetPageSize( 1 );               // always possible !

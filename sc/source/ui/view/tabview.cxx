@@ -1020,15 +1020,30 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
 
         if (pData->IsDeltaPixel())
         {
-            // macOS / Linux smooth-scroll devices: delta is already in pixels.
-            tools::Long nDelta = pData->GetDelta();
-            SAL_INFO("sc.smooth", "  -> IsDeltaPixel path, nDelta=" << nDelta);
-            // GTK encodes GDK_SCROLL_DOWN as mnDelta=-120 (negative = down),
-            // but SmoothScrollY/X treats positive as scroll-down.  Negate to align.
+            // Smooth-scroll device (touchpad / precision wheel): mnDelta is a raw unit
+            // (120 per standard notch), not actual pixels.  Use nScrollLines × standard
+            // cell size so the scroll distance is content-independent: a tall row at the
+            // top of the viewport must not cause a proportionally larger jump.
+            double nScrollLines = pData->GetScrollLines();
+            tools::Long nNotchDelta = pData->GetNotchDelta(); // ±1
             if (pData->IsHorz())
-                SmoothScrollX(-nDelta, eHPos);
+            {
+                tools::Long nStdColPx = std::max(1L, ScViewData::ToPixel(
+                    STD_COL_WIDTH, aViewData.GetPPTX()));
+                SAL_INFO("sc.smooth", "  -> IsDeltaPixel-horiz path, totalPx="
+                    << -nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdColPx));
+                SmoothScrollX(-nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdColPx),
+                              eHPos);
+            }
             else
-                SmoothScrollY(-nDelta, eVPos);
+            {
+                tools::Long nStdRowPx = std::max(1L, ScViewData::ToPixel(
+                    ScGlobal::nStdRowHeight, aViewData.GetPPTY()));
+                SAL_INFO("sc.smooth", "  -> IsDeltaPixel-vert path, totalPx="
+                    << -nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdRowPx));
+                SmoothScrollY(-nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdRowPx),
+                              eVPos);
+            }
         }
         else
         {
@@ -1052,31 +1067,24 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
             }
             else
             {
-                SCTAB nTabScrl = aViewData.CurrentTabForData();
+                // Use standard cell size as the per-line pixel unit so the scroll distance
+                // stays constant regardless of the height/width of the cell at the viewport edge.
                 if (pData->IsHorz())
                 {
-                    // Use the current leftmost column's width as the per-line pixel unit.
-                    // This matches the visual expectation that one notch = nScrollLines columns.
-                    SCCOL nLeftCol = aViewData.GetPosX(eHPos);
-                    tools::Long nColPx = std::max(1L, ScViewData::ToPixel(
-                        aViewData.GetDocument().GetColWidth(nLeftCol, nTabScrl),
-                        aViewData.GetPPTX()));
+                    tools::Long nStdColPx = std::max(1L, ScViewData::ToPixel(
+                        STD_COL_WIDTH, aViewData.GetPPTX()));
                     SAL_INFO("sc.smooth", "  -> Notch-horiz path, totalPx="
-                        << nNotchDelta * static_cast<tools::Long>(nScrollLines) * nColPx);
-                    SmoothScrollX(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nColPx,
+                        << -nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdColPx);
+                    SmoothScrollX(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdColPx,
                                   eHPos);
                 }
                 else
                 {
-                    // Use the current topmost row's height as the per-line pixel unit.
-                    // This matches the visual expectation that one notch = nScrollLines rows.
-                    SCROW nTopRow = aViewData.GetPosY(eVPos);
-                    tools::Long nRowPx = std::max(1L, ScViewData::ToPixel(
-                        aViewData.GetDocument().GetRowHeight(nTopRow, nTabScrl),
-                        aViewData.GetPPTY()));
+                    tools::Long nStdRowPx = std::max(1L, ScViewData::ToPixel(
+                        ScGlobal::nStdRowHeight, aViewData.GetPPTY()));
                     SAL_INFO("sc.smooth", "  -> Notch-vert path, totalPx="
-                        << -nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx);
-                    SmoothScrollY(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx,
+                        << -nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdRowPx);
+                    SmoothScrollY(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdRowPx,
                                   eVPos);
                 }
             }
@@ -1720,8 +1728,14 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
     // off, so we only reach here from wheel/trackpad events in that case.)
     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
     {
-        SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback");
-        ScrollY(nPixelDelta > 0 ? 1 : -1, eWhich);
+        // Derive cell count from the pixel delta using the standard row height so a tall
+        // row at the top doesn't distort the cell count (callers now pass nScrollLines ×
+        // nStdRowPx, so dividing by nStdRowPx recovers nScrollLines).
+        tools::Long nStdRowPxFb = std::max(1L, ScViewData::ToPixel(
+            ScGlobal::nStdRowHeight, aViewData.GetPPTY()));
+        tools::Long nCells = std::max(1L, (std::abs(nPixelDelta) + nStdRowPxFb / 2) / nStdRowPxFb);
+        SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback, nCells=" << nCells);
+        ScrollY(nPixelDelta > 0 ? nCells : -nCells, eWhich);
         return;
     }
     // The frozen top pane does not scroll.
@@ -1887,7 +1901,10 @@ void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
     // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
     {
-        ScrollX(nPixelDelta > 0 ? 1 : -1, eWhich);
+        tools::Long nStdColPxFb = std::max(1L, ScViewData::ToPixel(
+            STD_COL_WIDTH, aViewData.GetPPTX()));
+        tools::Long nCells = std::max(1L, (std::abs(nPixelDelta) + nStdColPxFb / 2) / nStdColPxFb);
+        ScrollX(nPixelDelta > 0 ? nCells : -nCells, eWhich);
         return;
     }
     // The frozen left pane does not scroll.

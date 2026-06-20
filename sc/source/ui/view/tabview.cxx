@@ -1023,10 +1023,12 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
             // macOS / Linux smooth-scroll devices: delta is already in pixels.
             tools::Long nDelta = pData->GetDelta();
             SAL_INFO("sc.smooth", "  -> IsDeltaPixel path, nDelta=" << nDelta);
+            // GTK encodes GDK_SCROLL_DOWN as mnDelta=-120 (negative = down),
+            // but SmoothScrollY/X treats positive as scroll-down.  Negate to align.
             if (pData->IsHorz())
-                SmoothScrollX(nDelta, eHPos);
+                SmoothScrollX(-nDelta, eHPos);
             else
-                SmoothScrollY(nDelta, eVPos);
+                SmoothScrollY(-nDelta, eVPos);
         }
         else
         {
@@ -1039,13 +1041,13 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
                 {
                     tools::Long nPageWidPx = aViewData.GetView()->GetGridWidth(eHPos);
                     SAL_INFO("sc.smooth", "  -> PageScroll-horiz path, nPageWidPx=" << nPageWidPx);
-                    SmoothScrollX(nNotchDelta > 0 ? nPageWidPx : -nPageWidPx, eHPos);
+                    SmoothScrollX(nNotchDelta > 0 ? -nPageWidPx : nPageWidPx, eHPos);
                 }
                 else
                 {
                     tools::Long nPagePx = aViewData.GetView()->GetGridHeight(eVPos);
                     SAL_INFO("sc.smooth", "  -> PageScroll path, nPagePx=" << nPagePx);
-                    SmoothScrollY(nNotchDelta > 0 ? nPagePx : -nPagePx, eVPos);
+                    SmoothScrollY(nNotchDelta > 0 ? -nPagePx : nPagePx, eVPos);
                 }
             }
             else
@@ -1061,7 +1063,7 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
                         aViewData.GetPPTX()));
                     SAL_INFO("sc.smooth", "  -> Notch-horiz path, totalPx="
                         << nNotchDelta * static_cast<tools::Long>(nScrollLines) * nColPx);
-                    SmoothScrollX(nNotchDelta * static_cast<tools::Long>(nScrollLines) * nColPx,
+                    SmoothScrollX(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nColPx,
                                   eHPos);
                 }
                 else
@@ -1073,8 +1075,8 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
                         aViewData.GetDocument().GetRowHeight(nTopRow, nTabScrl),
                         aViewData.GetPPTY()));
                     SAL_INFO("sc.smooth", "  -> Notch-vert path, totalPx="
-                        << nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx);
-                    SmoothScrollY(nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx,
+                        << -nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx);
+                    SmoothScrollY(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nRowPx,
                                   eVPos);
                 }
             }
@@ -1129,12 +1131,14 @@ bool ScTabView::GesturePanCommand(const CommandEvent& rCEvt)
         // prevents that jump: the first event on the new axis sees delta = 0.
         if (pData->meOrientation == PanningOrientation::Vertical)
         {
-            // mfOffset is the cumulative displacement since Begin; positive = finger moved down.
+            // mfOffset is raw finger displacement: positive = finger moved down.
+            // Unlike wheel events (where GTK negates for scroll-down), pan offsets
+            // are NOT sign-inverted — positive offset = scroll down = SmoothScrollY(+).
             tools::Long nDelta = static_cast<tools::Long>(pData->mfOffset - mfPreviousPanOffsetY);
             mfPreviousPanOffsetY = pData->mfOffset;
             mfPreviousPanOffsetX = pData->mfOffset;  // keep in sync; see comment above
             if (nDelta != 0)
-                SmoothScrollY(-nDelta, eVPos);
+                SmoothScrollY(nDelta, eVPos);
         }
         else
         {
@@ -1142,7 +1146,7 @@ bool ScTabView::GesturePanCommand(const CommandEvent& rCEvt)
             mfPreviousPanOffsetX = pData->mfOffset;
             mfPreviousPanOffsetY = pData->mfOffset;  // keep in sync; see comment above
             if (nDelta != 0)
-                SmoothScrollX(-nDelta, eHPos);
+                SmoothScrollX(nDelta, eHPos);
         }
         return true;
     }

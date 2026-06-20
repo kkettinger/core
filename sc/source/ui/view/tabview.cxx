@@ -1745,7 +1745,10 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
 
     tools::Long nCurrentOffset = aViewData.GetPixOffsetY(eWhich);
     SCROW nPosY = aViewData.GetPosY(eWhich);
-    SAL_INFO("sc.smooth", "  currentOffset=" << nCurrentOffset << " posY=" << nPosY << " nPPTY=" << nPPTY);
+    // In fixed-split bottom pane, never scroll above the freeze position.
+    SCROW nMinPosY = (aViewData.GetVSplitMode() == SC_SPLIT_FIX && eWhich == SC_SPLIT_BOTTOM)
+                     ? aViewData.GetFixPosY() : 0;
+    SAL_INFO("sc.smooth", "  currentOffset=" << nCurrentOffset << " posY=" << nPosY << " nPPTY=" << nPPTY << " nMinPosY=" << nMinPosY);
 
     // nNewOffset = current sub-cell offset minus delta.
     // Positive nPixelDelta = scroll down (content moves up), offset becomes more negative.
@@ -1779,10 +1782,10 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
     }
 
     // Retreat rows: nNewOffset is positive, scroll up past cell boundary.
-    while (nNewOffset > 0 && nPosY > 0)
+    while (nNewOffset > 0 && nPosY > nMinPosY)
     {
         --nPosY;
-        while (nPosY > 0 && rDoc.RowHidden(nPosY, nTab))
+        while (nPosY > nMinPosY && rDoc.RowHidden(nPosY, nTab))
             --nPosY;
 
         tools::Long nRowPx = ScViewData::ToPixel(
@@ -1791,8 +1794,8 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
         nNewOffset -= nRowPx;
     }
 
-    // Clamp at document top.
-    if (nPosY <= 0 && nNewOffset > 0)
+    // Clamp at top boundary (freeze position for bottom pane, document top otherwise).
+    if (nPosY <= nMinPosY && nNewOffset > 0)
         nNewOffset = 0;
     if (nNewOffset > 0)
         nNewOffset = 0;

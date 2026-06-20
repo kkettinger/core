@@ -1018,14 +1018,15 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
             << " NotchDelta=" << pData->GetNotchDelta()
             << " ScrollLines=" << pData->GetScrollLines());
 
+        double nScrollLines = pData->GetScrollLines();
+        tools::Long nNotchDelta = pData->GetNotchDelta(); // ±1 per notch / touchpad event
+
         if (pData->IsDeltaPixel())
         {
             // Smooth-scroll device (touchpad / precision wheel): mnDelta is a raw unit
             // (120 per standard notch), not actual pixels.  Use nScrollLines × standard
             // cell size so the scroll distance is content-independent: a tall row at the
             // top of the viewport must not cause a proportionally larger jump.
-            double nScrollLines = pData->GetScrollLines();
-            tools::Long nNotchDelta = pData->GetNotchDelta(); // ±1
             if (pData->IsHorz())
             {
                 tools::Long nStdColPx = std::max(1L, ScViewData::ToPixel(
@@ -1047,9 +1048,6 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
         }
         else
         {
-            double nScrollLines = pData->GetScrollLines();
-            tools::Long nNotchDelta = pData->GetNotchDelta(); // ±1 per notch
-
             if (nScrollLines == COMMAND_WHEEL_PAGESCROLL)
             {
                 if (pData->IsHorz())
@@ -1240,6 +1238,47 @@ IMPL_LINK_NOARG(ScTabView, EndScrollHdl, const MouseEvent&, bool)
     return false;
 }
 
+// Return the first row whose cumulative pixel height from nStart exceeds nPixel.
+static SCROW lcl_PixelToRow(ScDocument& rDoc, SCROW nStart, SCTAB nTab,
+                             double nPPTY, tools::Long nPixel)
+{
+    SCROW lo = nStart, hi = rDoc.MaxRow();
+    while (lo < hi)
+    {
+        SCROW mid = lo + (hi - lo) / 2;
+        if (rDoc.GetScaledRowHeight(nStart, mid, nTab, nPPTY) <= nPixel)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+// Return the column whose left edge in pixel space is at or just past nPixel from nStart.
+static SCCOL lcl_PixelToCol(ScDocument& rDoc, double nPPTX,
+                             SCCOL nStart, SCTAB nTab, tools::Long nPixel)
+{
+    tools::Long nAccum = 0;
+    SCCOL nCol = rDoc.MaxCol();
+    for (SCCOL c = nStart; c <= rDoc.MaxCol(); ++c)
+    {
+        tools::Long w = ScViewData::ToPixel(rDoc.GetColWidth(c, nTab), nPPTX);
+        if (nAccum + w > nPixel) { nCol = c; break; }
+        nAccum += w;
+    }
+    return nCol;
+}
+
+// Cumulative pixel width of columns nFrom..nTo inclusive (returns 0 when nFrom > nTo).
+static tools::Long lcl_GetScaledColWidthPx(ScDocument& rDoc, double nPPTX,
+                                            SCCOL nFrom, SCCOL nTo, SCTAB nTab)
+{
+    tools::Long nTotal = 0;
+    for (SCCOL c = nFrom; c <= nTo; ++c)
+        nTotal += ScViewData::ToPixel(rDoc.GetColWidth(c, nTab), nPPTX);
+    return nTotal;
+}
+
 void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
 {
     // Re-entrancy guard: UpdateScrollBars (called at the end of smooth scroll)
@@ -1293,39 +1332,15 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
             if ( aViewData.GetVSplitMode()==SC_SPLIT_FIX && pScroll == aVScrollBottom.get() )
                 nScrollMin = aViewData.GetFixPosY();
             tools::Long nScrollPos = GetScrollBarPos( *pScroll, bLayoutRTL );
-            if (!bHoriz)
             {
-                // Thumb is in pixel units; binary-search for the corresponding row.
-                SCTAB nTabQH = aViewData.CurrentTabForData();
                 ScDocument& rDocQH = aViewData.GetDocument();
-                SCROW loQH = static_cast<SCROW>(nScrollMin), hiQH = rDocQH.MaxRow();
-                while (loQH < hiQH)
-                {
-                    SCROW midQH = loQH + (hiQH - loQH) / 2;
-                    tools::Long cumH = rDocQH.GetScaledRowHeight(
-                        static_cast<SCROW>(nScrollMin), midQH, nTabQH, aViewData.GetPPTY());
-                    if (cumH <= nScrollPos) loQH = midQH + 1;
-                    else hiQH = midQH;
-                }
-                nScrollPos = loQH;  // 0-based row index
-            }
-            else
-            {
-                // Thumb is in pixel units; walk column widths to find the corresponding column.
                 SCTAB nTabQH = aViewData.CurrentTabForData();
-                ScDocument& rDocQH = aViewData.GetDocument();
-                SCCOL nStartColQH = static_cast<SCCOL>(nScrollMin);
-                tools::Long nQHAccum = 0;
-                SCCOL nQHCol = nStartColQH;
-                for (SCCOL c = nStartColQH; c <= rDocQH.MaxCol(); ++c)
-                {
-                    tools::Long w = aViewData.ToPixel(
-                        rDocQH.GetColWidth(c, nTabQH), aViewData.GetPPTX());
-                    if (nQHAccum + w > nScrollPos) { nQHCol = c; break; }
-                    nQHAccum += w;
-                    nQHCol = c + 1;
-                }
-                nScrollPos = nQHCol;
+                if (!bHoriz)
+                    nScrollPos = lcl_PixelToRow(rDocQH, static_cast<SCROW>(nScrollMin),
+                                                nTabQH, aViewData.GetPPTY(), nScrollPos);
+                else
+                    nScrollPos = lcl_PixelToCol(rDocQH, aViewData.GetPPTX(),
+                                                static_cast<SCCOL>(nScrollMin), nTabQH, nScrollPos);
             }
 
             OUString aHelpStr;
@@ -1438,18 +1453,10 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
                         || comphelper::LibreOfficeKit::isActive())
                     {
-                        // Smooth scroll OFF: binary-search for the row at nNewThumb pixels
-                        // and jump there in one step (same as pre-smooth-scroll drag behavior).
-                        SCROW loFB = static_cast<SCROW>(nScrollMin), hiFB = rDocV.MaxRow();
-                        while (loFB < hiFB)
-                        {
-                            SCROW midFB = loFB + (hiFB - loFB) / 2;
-                            tools::Long cumH = rDocV.GetScaledRowHeight(
-                                static_cast<SCROW>(nScrollMin), midFB, nTabV, aViewData.GetPPTY());
-                            if (cumH <= nNewThumb) loFB = midFB + 1;
-                            else hiFB = midFB;
-                        }
-                        tools::Long nCellDelta = static_cast<tools::Long>(loFB)
+                        // Smooth scroll OFF: find the row at nNewThumb pixels and jump there.
+                        SCROW nTargetRow = lcl_PixelToRow(rDocV, static_cast<SCROW>(nScrollMin),
+                                                          nTabV, aViewData.GetPPTY(), nNewThumb);
+                        tools::Long nCellDelta = static_cast<tools::Long>(nTargetRow)
                                                  - static_cast<tools::Long>(nCurPosY);
                         if (nCellDelta != 0)
                             ScrollY(nCellDelta, eVPLocal);
@@ -1466,14 +1473,11 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
 
                     tools::Long nNewThumb = GetScrollBarPos(*pScroll, bLayoutRTL);
 
-                    // Reconstruct current pixel position from nScrollMin.
-                    // TODO: replace with ScDocument::GetScaledColWidth() once that API exists
-                    // (rows have GetScaledRowHeight; columns currently require an O(N) walk).
                     SCCOL nCurPosX = aViewData.GetPosX(eHPLocal);
                     tools::Long nCurOff = aViewData.GetPixOffsetX(eHPLocal);
-                    tools::Long nCurThumb = 0;
-                    for (SCCOL c = static_cast<SCCOL>(nScrollMin); c < nCurPosX; ++c)
-                        nCurThumb += aViewData.ToPixel(rDocH.GetColWidth(c, nTabH), aViewData.GetPPTX());
+                    tools::Long nCurThumb = lcl_GetScaledColWidthPx(
+                        rDocH, aViewData.GetPPTX(),
+                        static_cast<SCCOL>(nScrollMin), nCurPosX - 1, nTabH);
                     nCurThumb += (-nCurOff);
 
                     tools::Long nPixDelta = nNewThumb - nCurThumb;
@@ -1488,19 +1492,10 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
                         || comphelper::LibreOfficeKit::isActive())
                     {
-                        // Smooth scroll OFF: walk column widths to find the column at
-                        // nNewThumb pixels and jump there in one step.
-                        SCCOL nStartColFB = static_cast<SCCOL>(nScrollMin);
-                        tools::Long nFBAccum = 0;
-                        SCCOL nColFB = rDocH.MaxCol();
-                        for (SCCOL c = nStartColFB; c <= rDocH.MaxCol(); ++c)
-                        {
-                            tools::Long w = aViewData.ToPixel(
-                                rDocH.GetColWidth(c, nTabH), aViewData.GetPPTX());
-                            if (nFBAccum + w > nNewThumb) { nColFB = c; break; }
-                            nFBAccum += w;
-                        }
-                        tools::Long nCellDelta = static_cast<tools::Long>(nColFB)
+                        // Smooth scroll OFF: find the column at nNewThumb pixels and jump there.
+                        SCCOL nTargetCol = lcl_PixelToCol(rDocH, aViewData.GetPPTX(),
+                                                          static_cast<SCCOL>(nScrollMin), nTabH, nNewThumb);
+                        tools::Long nCellDelta = static_cast<tools::Long>(nTargetCol)
                                                  - static_cast<tools::Long>(nCurPosX);
                         if (bLayoutRTL) nCellDelta = -nCellDelta;
                         if (nCellDelta != 0)
@@ -1542,14 +1537,11 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
             SCCOL nPosXFinal = aViewData.GetPosX(eHPFinal);
             double nPPTXFinal = aViewData.GetPPTX();
 
-            // Sum widths of the columns that will be crossed.
             SCCOL nColStart = (nDelta > 0) ? nPosXFinal : std::max<SCCOL>(0, nPosXFinal + static_cast<SCCOL>(nDelta));
             SCCOL nColEnd   = (nDelta > 0) ? std::min<SCCOL>(nPosXFinal + static_cast<SCCOL>(nDelta) - 1, rDocFinal.MaxCol())
                                            : nPosXFinal - 1;
-            tools::Long nPixFinal = 0;
-            for (SCCOL c = nColStart; c <= nColEnd; ++c)
-                nPixFinal += aViewData.ToPixel(rDocFinal.GetColWidth(c, nTabFinal), nPPTXFinal);
-            nPixFinal = std::max(1L, nPixFinal);
+            tools::Long nPixFinal = std::max(1L, lcl_GetScaledColWidthPx(
+                rDocFinal, nPPTXFinal, nColStart, nColEnd, nTabFinal));
             if (nDelta < 0) nPixFinal = -nPixFinal;
             if (bLayoutRTL) nPixFinal = -nPixFinal;
             SmoothScrollX(nPixFinal, eHPFinal);

@@ -1728,14 +1728,8 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
     // off, so we only reach here from wheel/trackpad events in that case.)
     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
     {
-        // Derive cell count from the pixel delta using the standard row height so a tall
-        // row at the top doesn't distort the cell count (callers now pass nScrollLines ×
-        // nStdRowPx, so dividing by nStdRowPx recovers nScrollLines).
-        tools::Long nStdRowPxFb = std::max(1L, ScViewData::ToPixel(
-            ScGlobal::nStdRowHeight, aViewData.GetPPTY()));
-        tools::Long nCells = std::max(1L, (std::abs(nPixelDelta) + nStdRowPxFb / 2) / nStdRowPxFb);
-        SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback, nCells=" << nCells);
-        ScrollY(nPixelDelta > 0 ? nCells : -nCells, eWhich);
+        SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback");
+        ScrollY(nPixelDelta > 0 ? 1 : -1, eWhich);
         return;
     }
     // The frozen top pane does not scroll.
@@ -1901,10 +1895,7 @@ void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
     // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
     {
-        tools::Long nStdColPxFb = std::max(1L, ScViewData::ToPixel(
-            STD_COL_WIDTH, aViewData.GetPPTX()));
-        tools::Long nCells = std::max(1L, (std::abs(nPixelDelta) + nStdColPxFb / 2) / nStdColPxFb);
-        ScrollX(nPixelDelta > 0 ? nCells : -nCells, eWhich);
+        ScrollX(nPixelDelta > 0 ? 1 : -1, eWhich);
         return;
     }
     // The frozen left pane does not scroll.

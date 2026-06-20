@@ -1434,7 +1434,27 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                         else if (nNewThumb < nPrevDragPos && nPixDelta > 0) nPixDelta = 0;
                     }
                     nPrevDragPos = nNewThumb;
-                    if (nPixDelta != 0)
+
+                    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
+                        || comphelper::LibreOfficeKit::isActive())
+                    {
+                        // Smooth scroll OFF: binary-search for the row at nNewThumb pixels
+                        // and jump there in one step (same as pre-smooth-scroll drag behavior).
+                        SCROW loFB = static_cast<SCROW>(nScrollMin), hiFB = rDocV.MaxRow();
+                        while (loFB < hiFB)
+                        {
+                            SCROW midFB = loFB + (hiFB - loFB) / 2;
+                            tools::Long cumH = rDocV.GetScaledRowHeight(
+                                static_cast<SCROW>(nScrollMin), midFB, nTabV, aViewData.GetPPTY());
+                            if (cumH <= nNewThumb) loFB = midFB + 1;
+                            else hiFB = midFB;
+                        }
+                        tools::Long nCellDelta = static_cast<tools::Long>(loFB)
+                                                 - static_cast<tools::Long>(nCurPosY);
+                        if (nCellDelta != 0)
+                            ScrollY(nCellDelta, eVPLocal);
+                    }
+                    else if (nPixDelta != 0)
                         SmoothScrollY(nPixDelta, eVPLocal);
                 }
                 else
@@ -1464,7 +1484,29 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                         else if (nNewThumb < nPrevDragPos && nPixDelta > 0) nPixDelta = 0;
                     }
                     nPrevDragPos = nNewThumb;
-                    if (nPixDelta != 0)
+
+                    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
+                        || comphelper::LibreOfficeKit::isActive())
+                    {
+                        // Smooth scroll OFF: walk column widths to find the column at
+                        // nNewThumb pixels and jump there in one step.
+                        SCCOL nStartColFB = static_cast<SCCOL>(nScrollMin);
+                        tools::Long nFBAccum = 0;
+                        SCCOL nColFB = rDocH.MaxCol();
+                        for (SCCOL c = nStartColFB; c <= rDocH.MaxCol(); ++c)
+                        {
+                            tools::Long w = aViewData.ToPixel(
+                                rDocH.GetColWidth(c, nTabH), aViewData.GetPPTX());
+                            if (nFBAccum + w > nNewThumb) { nColFB = c; break; }
+                            nFBAccum += w;
+                        }
+                        tools::Long nCellDelta = static_cast<tools::Long>(nColFB)
+                                                 - static_cast<tools::Long>(nCurPosX);
+                        if (bLayoutRTL) nCellDelta = -nCellDelta;
+                        if (nCellDelta != 0)
+                            ScrollX(nCellDelta, eHPLocal);
+                    }
+                    else if (nPixDelta != 0)
                         SmoothScrollX(nPixDelta, eHPLocal);
                 }
                 nDelta = 0;
@@ -1724,8 +1766,6 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
         return;
     }
     // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
-    // (The ScrollHdl cell-count path already bypasses SmoothScrollY when smooth scroll is
-    // off, so we only reach here from wheel/trackpad events in that case.)
     if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
     {
         SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback");

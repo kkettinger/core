@@ -219,11 +219,11 @@ ScTabView::ScTabView( vcl::Window* pParent, ScDocShell& rDocSh, ScTabViewShell* 
     bDrawSelMode( false ),
     bLockPaintBrush( false ),
     bDragging( false ),
-    bScrollHandlerActive( false ),
     bBlockNeg(false),
     bBlockCols( false ),
     bBlockRows( false ),
-    mbInlineWithScrollbar( false )
+    mbInlineWithScrollbar( false ),
+    bScrollHandlerActive( false )
 {
     // copy settings of existing shell for this document
     if (ScTabViewShell* pExistingViewShell = rDocSh.GetBestViewShell())

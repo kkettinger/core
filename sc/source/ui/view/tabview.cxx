@@ -1865,6 +1865,26 @@ void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
     // "ghost" that lags the smoothly scrolled grid content by nPixelDelta pixels.
     UpdateAllOverlays();
 
+    // Reposition the in-cell editor (EditView) to match the new pixel offset.
+    // ScrollPixel() normally does this via UpdateEditViewPos(), but smooth scroll
+    // bypasses ScrollPixel and uses Invalidate+PaintImmediately instead, so we
+    // must call it explicitly here.  Without this the editor widget stays fixed on
+    // screen while the grid scrolls underneath it.
+    if (eWhich == SC_SPLIT_BOTTOM)
+    {
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            pGridWin[SC_SPLIT_BOTTOMLEFT]->UpdateEditViewPos();
+        if (aViewData.GetHSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_BOTTOMRIGHT])
+            pGridWin[SC_SPLIT_BOTTOMRIGHT]->UpdateEditViewPos();
+    }
+    else
+    {
+        if (pGridWin[SC_SPLIT_TOPLEFT])
+            pGridWin[SC_SPLIT_TOPLEFT]->UpdateEditViewPos();
+        if (aViewData.GetHSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_TOPRIGHT])
+            pGridWin[SC_SPLIT_TOPRIGHT]->UpdateEditViewPos();
+    }
+
     // Full invalidate + synchronous paint.
     // ScrollPixel blit cannot be used here: cells render in VCL's mm100 coordinate system
     // whose origin can only approximate pixel positions.  After a pixel-granular blit the
@@ -2015,6 +2035,22 @@ void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
 
     // Refresh overlays to the new pixel-offset position before painting (same reason as SmoothScrollY).
     UpdateAllOverlays();
+
+    // Reposition the in-cell editor (same reason as SmoothScrollY — see comment there).
+    if (eWhich == SC_SPLIT_LEFT)
+    {
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            pGridWin[SC_SPLIT_BOTTOMLEFT]->UpdateEditViewPos();
+        if (aViewData.GetVSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_TOPLEFT])
+            pGridWin[SC_SPLIT_TOPLEFT]->UpdateEditViewPos();
+    }
+    else
+    {
+        if (pGridWin[SC_SPLIT_BOTTOMRIGHT])
+            pGridWin[SC_SPLIT_BOTTOMRIGHT]->UpdateEditViewPos();
+        if (aViewData.GetVSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_TOPRIGHT])
+            pGridWin[SC_SPLIT_TOPRIGHT]->UpdateEditViewPos();
+    }
 
     if (eWhich == SC_SPLIT_LEFT)
     {

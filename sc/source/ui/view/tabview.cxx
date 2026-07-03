@@ -1293,6 +1293,12 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
 
     bool bLayoutRTL = bHoriz && aViewData.GetDocument().IsLayoutRTL( aViewData.CurrentTabForData() );
 
+    // When smooth scrolling is off (or under tiled rendering) the scrollbars are
+    // cell-granular (see UpdateScrollBars): the thumb value is a row/column index,
+    // not a pixel position, so the pixel-based paths below must not be taken.
+    const bool bSmooth = !comphelper::LibreOfficeKit::isActive()
+        && officecfg::Office::Calc::Content::Display::SmoothScroll::get();
+
     ScrollType eType = pScroll->GetScrollType();
     if ( eType == ScrollType::Drag )
     {
@@ -1332,7 +1338,9 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
             if ( aViewData.GetVSplitMode()==SC_SPLIT_FIX && pScroll == aVScrollBottom.get() )
                 nScrollMin = aViewData.GetFixPosY();
             tools::Long nScrollPos = GetScrollBarPos( *pScroll, bLayoutRTL );
+            if (bSmooth)
             {
+                // Pixel-granular thumb: convert the pixel position to a row/column index.
                 ScDocument& rDocQH = aViewData.GetDocument();
                 SCTAB nTabQH = aViewData.CurrentTabForData();
                 if (!bHoriz)
@@ -1341,6 +1349,11 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                 else
                     nScrollPos = lcl_PixelToCol(rDocQH, aViewData.GetPPTX(),
                                                 static_cast<SCCOL>(nScrollMin), nTabQH, nScrollPos);
+            }
+            else
+            {
+                // Cell-granular thumb: the value is already a row/column index.
+                nScrollPos += nScrollMin;
             }
 
             OUString aHelpStr;
@@ -1424,6 +1437,30 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                 if ( aViewData.GetVSplitMode()==SC_SPLIT_FIX && pScroll == aVScrollBottom.get() )
                     nScrollMin = aViewData.GetFixPosY();
 
+                if (!bSmooth)
+                {
+                    // Cell-granular scrollbar (master behaviour): the thumb value is a
+                    // row/column index (0-based from nStart).  Compute the cell delta and
+                    // let the shared `if (nDelta)` tail dispatch ScrollX/ScrollY.
+                    tools::Long nThumb = GetScrollBarPos(*pScroll, bLayoutRTL);
+                    tools::Long nScrollPos = nThumb + nScrollMin;   // absolute cell index
+                    tools::Long nViewPos = bHoriz
+                        ? aViewData.GetPosX((pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT)
+                        : aViewData.GetPosY((pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM);
+                    nDelta = nScrollPos - nViewPos;
+
+                    // Anti-jitter for drag: only scroll in the direction the thumb moved,
+                    // do not bounce back across hidden ranges.
+                    if (eType == ScrollType::Drag)
+                    {
+                        if (nThumb > nPrevDragPos)      { if (nDelta < 0) nDelta = 0; }
+                        else if (nThumb < nPrevDragPos) { if (nDelta > 0) nDelta = 0; }
+                        else                              nDelta = 0;
+                    }
+                    nPrevDragPos = nThumb;
+                    break;   // nDelta handled by the shared tail below
+                }
+
                 // Both horizontal and vertical scrollbars are in pixel units.
                 // Compute the pixel delta and dispatch to the appropriate smooth-scroll function.
                 if (!bHoriz)
@@ -1450,18 +1487,8 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                     }
                     nPrevDragPos = nNewThumb;
 
-                    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
-                        || comphelper::LibreOfficeKit::isActive())
-                    {
-                        // Smooth scroll OFF: find the row at nNewThumb pixels and jump there.
-                        SCROW nTargetRow = lcl_PixelToRow(rDocV, static_cast<SCROW>(nScrollMin),
-                                                          nTabV, aViewData.GetPPTY(), nNewThumb);
-                        tools::Long nCellDelta = static_cast<tools::Long>(nTargetRow)
-                                                 - static_cast<tools::Long>(nCurPosY);
-                        if (nCellDelta != 0)
-                            ScrollY(nCellDelta, eVPLocal);
-                    }
-                    else if (nPixDelta != 0)
+                    // Smooth scroll is on here (guaranteed by bSmooth above).
+                    if (nPixDelta != 0)
                         SmoothScrollY(nPixDelta, eVPLocal);
                 }
                 else
@@ -1489,19 +1516,8 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                     }
                     nPrevDragPos = nNewThumb;
 
-                    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
-                        || comphelper::LibreOfficeKit::isActive())
-                    {
-                        // Smooth scroll OFF: find the column at nNewThumb pixels and jump there.
-                        SCCOL nTargetCol = lcl_PixelToCol(rDocH, aViewData.GetPPTX(),
-                                                          static_cast<SCCOL>(nScrollMin), nTabH, nNewThumb);
-                        tools::Long nCellDelta = static_cast<tools::Long>(nTargetCol)
-                                                 - static_cast<tools::Long>(nCurPosX);
-                        if (bLayoutRTL) nCellDelta = -nCellDelta;
-                        if (nCellDelta != 0)
-                            ScrollX(nCellDelta, eHPLocal);
-                    }
-                    else if (nPixDelta != 0)
+                    // Smooth scroll is on here (guaranteed by bSmooth above).
+                    if (nPixDelta != 0)
                         SmoothScrollX(nPixDelta, eHPLocal);
                 }
                 nDelta = 0;
@@ -1516,13 +1532,16 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
         // ScrollX/Y so that PageUp/Down moves the correct number of rows/columns.
         // (The SmoothScrollX/Y fallback only ever scrolls ±1 cell, which is wrong
         // for page-granular events.)
-        if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get()
-            || comphelper::LibreOfficeKit::isActive())
+        if (!bSmooth)
         {
+            // Don't alter the scrollbar ranges while dragging (master behaviour);
+            // EndScrollHdl re-syncs them when the drag ends.  This avoids the thumb
+            // jumping mid-drag on sheets whose scroll range grows as new rows appear.
+            const bool bUpd = (eType != ScrollType::Drag);
             if (bHoriz)
-                ScrollX(nDelta, (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT, true);
+                ScrollX(nDelta, (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT, bUpd);
             else
-                ScrollY(nDelta, (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM, true);
+                ScrollY(nDelta, (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM, bUpd);
             return;
         }
 

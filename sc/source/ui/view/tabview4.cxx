@@ -641,8 +641,44 @@ void ScTabView::UpdateScrollBars( HeaderType eHeaderType )
     if (bTop)
     {
         nVisYT = aViewData.VisibleCellsY( SC_SPLIT_TOP );
-        tools::Long nMaxYT = lcl_GetScrollRange( nUsedY, aViewData.GetPosY(SC_SPLIT_TOP), nVisYT, rDoc.MaxRow(), 0 );
-        SetScrollBar( *aVScrollTop, nMaxYT, nVisYT, aViewData.GetPosY( SC_SPLIT_TOP ), false );
+        if (bSmoothScroll)
+        {
+            // Pixel-proportional vertical scrollbar for the top pane of a movable
+            // (SC_SPLIT_NORMAL) split.  The top pane always starts at row 0 — freeze
+            // mode (SC_SPLIT_FIX) gives aVScrollTop zero height, so it is never used
+            // there — hence nStart is 0 for this bar.
+            SCROW nPosYT = aViewData.GetPosY(SC_SPLIT_TOP);
+            tools::Long nOffYT = aViewData.GetPixOffsetY(SC_SPLIT_TOP);
+            tools::Long nRowPxT = std::max(1L, aViewData.ToPixel(
+                rDoc.GetRowHeight(nPosYT, nTab), aViewData.GetPPTY()));
+
+            SCROW nScrollEndYT = std::min(
+                std::max(static_cast<SCROW>(nUsedY + nVisYT + 2),
+                         static_cast<SCROW>(nPosYT + nVisYT + 2)),
+                rDoc.MaxRow());
+            tools::Long nTotalPxT = rDoc.GetScaledRowHeight(0, nScrollEndYT, nTab,
+                                                            aViewData.GetPPTY());
+
+            tools::Long nThumbT = (nPosYT > 0)
+                ? rDoc.GetScaledRowHeight(0, nPosYT - 1, nTab, aViewData.GetPPTY())
+                : 0;
+            nThumbT += (-nOffYT);  // nOffYT ≤ 0
+
+            tools::Long nVisPixT = 0;
+            if (pGridWin[SC_SPLIT_TOPLEFT])
+                nVisPixT = pGridWin[SC_SPLIT_TOPLEFT]->GetOutputSizePixel().Height();
+            if (nVisPixT <= 0)
+                nVisPixT = nVisYT * nRowPxT;
+
+            SetScrollBar(*aVScrollTop, nTotalPxT, nVisPixT, nThumbT, false);
+            aVScrollTop->SetLineSize(nRowPxT);
+        }
+        else
+        {
+            tools::Long nMaxYT = lcl_GetScrollRange( nUsedY, aViewData.GetPosY(SC_SPLIT_TOP), nVisYT, rDoc.MaxRow(), 0 );
+            SetScrollBar( *aVScrollTop, nMaxYT, nVisYT, aViewData.GetPosY( SC_SPLIT_TOP ), false );
+            aVScrollTop->SetLineSize( 1 );
+        }
     }
 
     //      test the range
@@ -717,8 +753,27 @@ void ScTabView::UpdateScrollBars( HeaderType eHeaderType )
     }
     if (bTop)
     {
-        nDiff = lcl_UpdateBar( *aVScrollTop, nVisYT );
-        if (nDiff) ScrollY( nDiff, SC_SPLIT_TOP );
+        if (bSmoothScroll)
+        {
+            tools::Long nVisPixT2 = 0;
+            if (pGridWin[SC_SPLIT_TOPLEFT])
+                nVisPixT2 = pGridWin[SC_SPLIT_TOPLEFT]->GetOutputSizePixel().Height();
+            if (nVisPixT2 <= 0)
+            {
+                SCROW nPosYT2 = aViewData.GetPosY(SC_SPLIT_TOP);
+                tools::Long nRowPxT2 = std::max(1L, aViewData.ToPixel(
+                    rDoc.GetRowHeight(nPosYT2, nTab), aViewData.GetPPTY()));
+                nVisPixT2 = nVisYT * nRowPxT2;
+            }
+            nDiff = lcl_UpdateBar(*aVScrollTop, nVisPixT2);
+            if (nDiff != 0)
+                SmoothScrollY(nDiff, SC_SPLIT_TOP);
+        }
+        else
+        {
+            nDiff = lcl_UpdateBar( *aVScrollTop, nVisYT );
+            if (nDiff) ScrollY( nDiff, SC_SPLIT_TOP );
+        }
     }
 
     //      set visible area for online spelling

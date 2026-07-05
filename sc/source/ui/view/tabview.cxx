@@ -21,6 +21,7 @@
 #include <sfx2/viewfrm.hxx>
 #include <sfx2/bindings.hxx>
 #include <vcl/commandevent.hxx>
+#include <vcl/GestureEventPan.hxx>
 #include <vcl/help.hxx>
 #include <vcl/settings.hxx>
 #include <vcl/cursor.hxx>
@@ -50,9 +51,11 @@
 #include <appoptio.hxx>
 #include <attrib.hxx>
 #include <spellcheckcontext.hxx>
+#include <comphelper/flagguard.hxx>
 #include <comphelper/lok.hxx>
 #include <sfx2/lokhelper.hxx>
 #include <osl/diagnose.h>
+#include <officecfg/Office/Calc.hxx>
 
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
@@ -216,10 +219,11 @@ ScTabView::ScTabView( vcl::Window* pParent, ScDocShell& rDocSh, ScTabViewShell* 
     bDrawSelMode( false ),
     bLockPaintBrush( false ),
     bDragging( false ),
-    bBlockNeg( false ),
+    bBlockNeg(false),
     bBlockCols( false ),
     bBlockRows( false ),
-    mbInlineWithScrollbar( false )
+    mbInlineWithScrollbar( false ),
+    bScrollHandlerActive( false )
 {
     // copy settings of existing shell for this document
     if (ScTabViewShell* pExistingViewShell = rDocSh.GetBestViewShell())
@@ -1002,6 +1006,89 @@ bool ScTabView::ScrollCommand( const CommandEvent& rCEvt, ScSplitPos ePos )
             bDone = true;
         }
     }
+    else if (pData && pData->GetMode() == CommandWheelMode::SCROLL
+             && !comphelper::LibreOfficeKit::isActive())
+    {
+        ScHSplitPos eHPos = WhichH(ePos);
+        ScVSplitPos eVPos = WhichV(ePos);
+
+        SAL_INFO("sc.smooth", "ScrollCommand SCROLL: IsDeltaPixel=" << pData->IsDeltaPixel()
+            << " IsHorz=" << pData->IsHorz()
+            << " Delta=" << pData->GetDelta()
+            << " NotchDelta=" << pData->GetNotchDelta()
+            << " ScrollLines=" << pData->GetScrollLines());
+
+        double nScrollLines = pData->GetScrollLines();
+        tools::Long nNotchDelta = pData->GetNotchDelta(); // ±1 per notch / touchpad event
+
+        if (pData->IsDeltaPixel())
+        {
+            // Smooth-scroll device (touchpad / precision wheel): mnDelta is a raw unit
+            // (120 per standard notch), not actual pixels.  Use nScrollLines × standard
+            // cell size so the scroll distance is content-independent: a tall row at the
+            // top of the viewport must not cause a proportionally larger jump.
+            if (pData->IsHorz())
+            {
+                tools::Long nStdColPx = std::max(1L, ScViewData::ToPixel(
+                    STD_COL_WIDTH, aViewData.GetPPTX()));
+                SAL_INFO("sc.smooth", "  -> IsDeltaPixel-horiz path, totalPx="
+                    << -nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdColPx));
+                SmoothScrollX(-nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdColPx),
+                              eHPos);
+            }
+            else
+            {
+                tools::Long nStdRowPx = std::max(1L, ScViewData::ToPixel(
+                    ScGlobal::nStdRowHeight, aViewData.GetPPTY()));
+                SAL_INFO("sc.smooth", "  -> IsDeltaPixel-vert path, totalPx="
+                    << -nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdRowPx));
+                SmoothScrollY(-nNotchDelta * static_cast<tools::Long>(nScrollLines * nStdRowPx),
+                              eVPos);
+            }
+        }
+        else
+        {
+            if (nScrollLines == COMMAND_WHEEL_PAGESCROLL)
+            {
+                if (pData->IsHorz())
+                {
+                    tools::Long nPageWidPx = aViewData.GetView()->GetGridWidth(eHPos);
+                    SAL_INFO("sc.smooth", "  -> PageScroll-horiz path, nPageWidPx=" << nPageWidPx);
+                    SmoothScrollX(nNotchDelta > 0 ? -nPageWidPx : nPageWidPx, eHPos);
+                }
+                else
+                {
+                    tools::Long nPagePx = aViewData.GetView()->GetGridHeight(eVPos);
+                    SAL_INFO("sc.smooth", "  -> PageScroll path, nPagePx=" << nPagePx);
+                    SmoothScrollY(nNotchDelta > 0 ? -nPagePx : nPagePx, eVPos);
+                }
+            }
+            else
+            {
+                // Use standard cell size as the per-line pixel unit so the scroll distance
+                // stays constant regardless of the height/width of the cell at the viewport edge.
+                if (pData->IsHorz())
+                {
+                    tools::Long nStdColPx = std::max(1L, ScViewData::ToPixel(
+                        STD_COL_WIDTH, aViewData.GetPPTX()));
+                    SAL_INFO("sc.smooth", "  -> Notch-horiz path, totalPx="
+                        << -nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdColPx);
+                    SmoothScrollX(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdColPx,
+                                  eHPos);
+                }
+                else
+                {
+                    tools::Long nStdRowPx = std::max(1L, ScViewData::ToPixel(
+                        ScGlobal::nStdRowHeight, aViewData.GetPPTY()));
+                    SAL_INFO("sc.smooth", "  -> Notch-vert path, totalPx="
+                        << -nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdRowPx);
+                    SmoothScrollY(-nNotchDelta * static_cast<tools::Long>(nScrollLines) * nStdRowPx,
+                                  eVPos);
+                }
+            }
+        }
+        bDone = true;
+    }
     else
     {
         ScHSplitPos eHPos = WhichH(ePos);
@@ -1018,7 +1105,6 @@ bool ScTabView::GesturePanCommand(const CommandEvent& rCEvt)
 {
     HideNoteOverlay();
 
-    bool bDone = false;
     const CommandGesturePanData* pData = rCEvt.GetGesturePanData();
     if (!pData)
         return false;
@@ -1026,15 +1112,58 @@ bool ScTabView::GesturePanCommand(const CommandEvent& rCEvt)
     if (aViewData.GetViewShell()->GetViewFrame().GetFrame().IsInPlace())
         return false;
 
+    if (comphelper::LibreOfficeKit::isActive())
+        return false;
+
     ScSplitPos ePos = aViewData.GetActivePart();
     ScHSplitPos eHPos = WhichH(ePos);
     ScVSplitPos eVPos = WhichV(ePos);
-    ScrollAdaptor* pHScroll = (eHPos == SC_SPLIT_LEFT) ? aHScrollLeft.get() : aHScrollRight.get();
-    ScrollAdaptor* pVScroll = (eVPos == SC_SPLIT_TOP) ? aVScrollTop.get() : aVScrollBottom.get();
-    if (pGridWin[ePos])
-        bDone = pGridWin[ePos]->HandleScrollCommand(rCEvt, pHScroll, pVScroll);
 
-    return bDone;
+    if (pData->meEventType == GestureEventPanType::Begin)
+    {
+        mfPreviousPanOffsetX = mfPreviousPanOffsetY = 0.0;
+        return true;
+    }
+
+    if (pData->meEventType == GestureEventPanType::Update)
+    {
+        // mfOffset is a cumulative scalar displacement since Begin.  Separate
+        // mfPreviousPanOffsetX/Y accumulators track the "last seen" value for each
+        // axis.  When the gesture's reported orientation switches mid-gesture (e.g. a
+        // diagonal swipe starts as Vertical then becomes Horizontal), the stale
+        // accumulator for the newly-active axis would compute an erroneously large
+        // delta equal to the full displacement accumulated during the previous axis.
+        // Keeping both accumulators at the current mfOffset on every Update event
+        // prevents that jump: the first event on the new axis sees delta = 0.
+        if (pData->meOrientation == PanningOrientation::Vertical)
+        {
+            // mfOffset is raw finger displacement: positive = finger moved down.
+            // Unlike wheel events (where GTK negates for scroll-down), pan offsets
+            // are NOT sign-inverted — positive offset = scroll down = SmoothScrollY(+).
+            tools::Long nDelta = static_cast<tools::Long>(pData->mfOffset - mfPreviousPanOffsetY);
+            mfPreviousPanOffsetY = pData->mfOffset;
+            mfPreviousPanOffsetX = pData->mfOffset;  // keep in sync; see comment above
+            if (nDelta != 0)
+                SmoothScrollY(nDelta, eVPos);
+        }
+        else
+        {
+            tools::Long nDelta = static_cast<tools::Long>(pData->mfOffset - mfPreviousPanOffsetX);
+            mfPreviousPanOffsetX = pData->mfOffset;
+            mfPreviousPanOffsetY = pData->mfOffset;  // keep in sync; see comment above
+            if (nDelta != 0)
+                SmoothScrollX(nDelta, eHPos);
+        }
+        return true;
+    }
+
+    if (pData->meEventType == GestureEventPanType::End)
+    {
+        mfPreviousPanOffsetX = mfPreviousPanOffsetY = 0.0;
+        return true;
+    }
+
+    return false;
 }
 
 bool ScTabView::GestureZoomCommand(const CommandEvent& rCEvt)
@@ -1109,20 +1238,66 @@ IMPL_LINK_NOARG(ScTabView, EndScrollHdl, const MouseEvent&, bool)
     return false;
 }
 
+// Return the first row whose cumulative pixel height from nStart exceeds nPixel.
+static SCROW lcl_PixelToRow(ScDocument& rDoc, SCROW nStart, SCTAB nTab,
+                             double nPPTY, tools::Long nPixel)
+{
+    SCROW lo = nStart, hi = rDoc.MaxRow();
+    while (lo < hi)
+    {
+        SCROW mid = lo + (hi - lo) / 2;
+        if (rDoc.GetScaledRowHeight(nStart, mid, nTab, nPPTY) <= nPixel)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+// Return the column whose left edge in pixel space is at or just past nPixel from nStart.
+static SCCOL lcl_PixelToCol(ScDocument& rDoc, double nPPTX,
+                             SCCOL nStart, SCTAB nTab, tools::Long nPixel)
+{
+    tools::Long nAccum = 0;
+    SCCOL nCol = rDoc.MaxCol();
+    for (SCCOL c = nStart; c <= rDoc.MaxCol(); ++c)
+    {
+        tools::Long w = ScViewData::ToPixel(rDoc.GetColWidth(c, nTab), nPPTX);
+        if (nAccum + w > nPixel) { nCol = c; break; }
+        nAccum += w;
+    }
+    return nCol;
+}
+
+// Cumulative pixel width of columns nFrom..nTo inclusive (returns 0 when nFrom > nTo).
+static tools::Long lcl_GetScaledColWidthPx(ScDocument& rDoc, double nPPTX,
+                                            SCCOL nFrom, SCCOL nTo, SCTAB nTab)
+{
+    tools::Long nTotal = 0;
+    for (SCCOL c = nFrom; c <= nTo; ++c)
+        nTotal += ScViewData::ToPixel(rDoc.GetColWidth(c, nTab), nPPTX);
+    return nTotal;
+}
+
 void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
 {
-    bool bUpdateHorizontalScrollbars = false;
+    // Re-entrancy guard: UpdateScrollBars (called at the end of smooth scroll)
+    // calls SetScrollBar which calls SetVisibleSize → adjustment_set_page_size.
+    // GTK may clamp the value and emit value-changed again synchronously.
+    // That spurious event must not trigger another scroll step.
+    if (bScrollHandlerActive)
+        return;
+    comphelper::FlagRestorationGuard aScrollGuard(bScrollHandlerActive, true);
 
     bool bHoriz = ( pScroll == aHScrollLeft.get() || pScroll == aHScrollRight.get() );
-    tools::Long nViewPos;
-    if ( bHoriz )
-        nViewPos = aViewData.GetPosX( (pScroll == aHScrollLeft.get()) ?
-                                        SC_SPLIT_LEFT : SC_SPLIT_RIGHT );
-    else
-        nViewPos = aViewData.GetPosY( (pScroll == aVScrollTop.get()) ?
-                                        SC_SPLIT_TOP : SC_SPLIT_BOTTOM );
 
     bool bLayoutRTL = bHoriz && aViewData.GetDocument().IsLayoutRTL( aViewData.CurrentTabForData() );
+
+    // When smooth scrolling is off (or under tiled rendering) the scrollbars are
+    // cell-granular (see UpdateScrollBars): the thumb value is a row/column index,
+    // not a pixel position, so the pixel-based paths below must not be taken.
+    const bool bSmooth = !comphelper::LibreOfficeKit::isActive()
+        && officecfg::Office::Calc::Content::Display::SmoothScroll::get();
 
     ScrollType eType = pScroll->GetScrollType();
     if ( eType == ScrollType::Drag )
@@ -1130,7 +1305,9 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
         if (!bDragging)
         {
             bDragging = true;
-            nPrevDragPos = nViewPos;
+            // Seed nPrevDragPos from the scrollbar's current logical position
+            // so the first drag event compares like-for-like (pixel units).
+            nPrevDragPos = GetScrollBarPos(*pScroll, bLayoutRTL);
         }
 
         // show scroll position
@@ -1160,7 +1337,24 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                 nScrollMin = aViewData.GetFixPosX();
             if ( aViewData.GetVSplitMode()==SC_SPLIT_FIX && pScroll == aVScrollBottom.get() )
                 nScrollMin = aViewData.GetFixPosY();
-            tools::Long nScrollPos = GetScrollBarPos( *pScroll, bLayoutRTL ) + nScrollMin;
+            tools::Long nScrollPos = GetScrollBarPos( *pScroll, bLayoutRTL );
+            if (bSmooth)
+            {
+                // Pixel-granular thumb: convert the pixel position to a row/column index.
+                ScDocument& rDocQH = aViewData.GetDocument();
+                SCTAB nTabQH = aViewData.CurrentTabForData();
+                if (!bHoriz)
+                    nScrollPos = lcl_PixelToRow(rDocQH, static_cast<SCROW>(nScrollMin),
+                                                nTabQH, aViewData.GetPPTY(), nScrollPos);
+                else
+                    nScrollPos = lcl_PixelToCol(rDocQH, aViewData.GetPPTX(),
+                                                static_cast<SCCOL>(nScrollMin), nTabQH, nScrollPos);
+            }
+            else
+            {
+                // Cell-granular thumb: the value is already a row/column index.
+                nScrollPos += nScrollMin;
+            }
 
             OUString aHelpStr;
             tools::Rectangle aRect;
@@ -1243,119 +1437,153 @@ void ScTabView::ScrollHdl(ScrollAdaptor* pScroll)
                 if ( aViewData.GetVSplitMode()==SC_SPLIT_FIX && pScroll == aVScrollBottom.get() )
                     nScrollMin = aViewData.GetFixPosY();
 
-                tools::Long nScrollPos = GetScrollBarPos( *pScroll, bLayoutRTL ) + nScrollMin;
-                nDelta = nScrollPos - nViewPos;
-
-                // tdf#152406 Disable anti-jitter code for scroll wheel events
-                // After moving thousands of columns to the right via
-                // horizontal scroll wheel or trackpad swipe events, most
-                // vertical scroll wheel or trackpad swipe events will trigger
-                // the anti-jitter code because nScrollPos and nPrevDragPos
-                // will be equal and nDelta will be overridden and set to zero.
-                // So, only use the anti-jitter code for mouse drag events.
-                if ( eType == ScrollType::Drag )
+                if (!bSmooth)
                 {
-                    if ( nScrollPos > nPrevDragPos )
-                    {
-                        if (nDelta<0) nDelta=0;
-                    }
-                    else if ( nScrollPos < nPrevDragPos )
-                    {
-                        if (nDelta>0) nDelta=0;
-                    }
-                    else
-                        nDelta = 0;
-                }
-                else if ( bHoriz )
-                {
-                    // tdf#135478 Reduce sensitivity of horizontal scrollwheel
-                    // Problem: at least on macOS, swipe events are very
-                    // precise. So, when swiping at a slight angle off of
-                    // vertical, swipe events will include a small amount
-                    // of horizontal movement. Since horizontal swipe units
-                    // are measured in cell widths, these small amounts of
-                    // horizontal movement results in shifting many columns
-                    // to the right or left while swiping almost vertically.
-                    // So my hacky fix is to reduce the amount of horizontal
-                    // swipe events to roughly match the "visual distance"
-                    // of vertical swipe events.
-                    // The reduction factor is arbitrary but is set to
-                    // roughly the ratio of default cell width divided by
-                    // default cell height. This hacky fix isn't a perfect
-                    // fix, but hopefully it reduces the amount of
-                    // unexpected horizontal shifting while swiping
-                    // vertically to a tolerable amount for most users.
-                    // Note: the potential downside of doing this is that
-                    // some users might find horizontal swiping to be
-                    // slower than they are used to. If that becomes an
-                    // issue for enough users, the reduction factor may
-                    // need to be lowered to find a good balance point.
-#ifdef _WIN32
-                    static const tools::Long nHScrollReductionFactor = 3;
-#else
-                    static const tools::Long nHScrollReductionFactor = 8;
-#endif
+                    // Cell-granular scrollbar (master behaviour): the thumb value is a
+                    // row/column index (0-based from nStart).  Compute the cell delta and
+                    // let the shared `if (nDelta)` tail dispatch ScrollX/ScrollY.
+                    tools::Long nThumb = GetScrollBarPos(*pScroll, bLayoutRTL);
+                    tools::Long nScrollPos = nThumb + nScrollMin;   // absolute cell index
+                    tools::Long nViewPos = bHoriz
+                        ? aViewData.GetPosX((pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT)
+                        : aViewData.GetPosY((pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM);
+                    nDelta = nScrollPos - nViewPos;
 
-                    // tdf#161945 increase sensitivity for negative horizontal deltas
-                    // A side effect of the anti-jitter code is that it tends
-                    // to reduce the sensitivity of horizontal scroll events
-                    // towards the first column. It is particularly noticeable
-                    // with horizontal scroll events from a scrollwheel when
-                    // the view position is in column B or C. This results in
-                    // a very small delta from the anti-jitter code.
-                    // So, to balance things out, apply a constant adjustment
-                    // factor to increase the sensitivity more for small deltas
-                    // than for large deltas.
-                    static const tools::Long nHScrollNegativeDeltaAdjustmentFactor = -1;
-                    if ( nDelta < 0 )
-                        nDelta += nHScrollNegativeDeltaAdjustmentFactor;
-
-                    if ( pScroll == aHScrollLeft.get() )
+                    // Anti-jitter for drag: only scroll in the direction the thumb moved,
+                    // do not bounce back across hidden ranges.
+                    if (eType == ScrollType::Drag)
                     {
-                        mnPendingaHScrollLeftDelta += nDelta;
-                        nDelta = 0;
-                        if ( abs(mnPendingaHScrollLeftDelta) > nHScrollReductionFactor )
-                        {
-                            nDelta = mnPendingaHScrollLeftDelta / nHScrollReductionFactor;
-                            mnPendingaHScrollLeftDelta = mnPendingaHScrollLeftDelta % nHScrollReductionFactor;
-                        }
+                        if (nThumb > nPrevDragPos)      { if (nDelta < 0) nDelta = 0; }
+                        else if (nThumb < nPrevDragPos) { if (nDelta > 0) nDelta = 0; }
+                        else                              nDelta = 0;
                     }
-                    else
-                    {
-                        mnPendingaHScrollRightDelta += nDelta;
-                        nDelta = 0;
-                        if ( abs(mnPendingaHScrollRightDelta) > nHScrollReductionFactor )
-                        {
-                            nDelta = mnPendingaHScrollRightDelta / nHScrollReductionFactor;
-                            mnPendingaHScrollRightDelta = mnPendingaHScrollRightDelta % nHScrollReductionFactor;
-                        }
-                    }
-
-                    bUpdateHorizontalScrollbars = true;
+                    nPrevDragPos = nThumb;
+                    break;   // nDelta handled by the shared tail below
                 }
 
-                nPrevDragPos = nScrollPos;
+                // Both horizontal and vertical scrollbars are in pixel units.
+                // Compute the pixel delta and dispatch to the appropriate smooth-scroll function.
+                if (!bHoriz)
+                {
+                    ScVSplitPos eVPLocal = (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM;
+                    SCTAB nTabV = aViewData.CurrentTabForData();
+                    ScDocument& rDocV = aViewData.GetDocument();
+
+                    tools::Long nNewThumb = pScroll->GetThumbPos();
+
+                    SCROW nCurPosY = aViewData.GetPosY(eVPLocal);
+                    tools::Long nCurOff = aViewData.GetPixOffsetY(eVPLocal);
+                    tools::Long nCurThumb = (nCurPosY > static_cast<SCROW>(nScrollMin))
+                        ? rDocV.GetScaledRowHeight(static_cast<SCROW>(nScrollMin),
+                                                   nCurPosY - 1, nTabV, aViewData.GetPPTY())
+                        : 0;
+                    nCurThumb += (-nCurOff);
+
+                    tools::Long nPixDelta = nNewThumb - nCurThumb;
+                    if (eType == ScrollType::Drag)
+                    {
+                        if (nNewThumb > nPrevDragPos && nPixDelta < 0) nPixDelta = 0;
+                        else if (nNewThumb < nPrevDragPos && nPixDelta > 0) nPixDelta = 0;
+                    }
+                    nPrevDragPos = nNewThumb;
+
+                    // Smooth scroll is on here (guaranteed by bSmooth above).
+                    if (nPixDelta != 0)
+                        SmoothScrollY(nPixDelta, eVPLocal);
+                }
+                else
+                {
+                    // Horizontal scrollbar is also pixel-proportional.
+                    ScHSplitPos eHPLocal = (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT;
+                    SCTAB nTabH = aViewData.CurrentTabForData();
+                    ScDocument& rDocH = aViewData.GetDocument();
+
+                    tools::Long nNewThumb = GetScrollBarPos(*pScroll, bLayoutRTL);
+
+                    SCCOL nCurPosX = aViewData.GetPosX(eHPLocal);
+                    tools::Long nCurOff = aViewData.GetPixOffsetX(eHPLocal);
+                    tools::Long nCurThumb = lcl_GetScaledColWidthPx(
+                        rDocH, aViewData.GetPPTX(),
+                        static_cast<SCCOL>(nScrollMin), nCurPosX - 1, nTabH);
+                    nCurThumb += (-nCurOff);
+
+                    tools::Long nPixDelta = nNewThumb - nCurThumb;
+                    if (bLayoutRTL) nPixDelta = -nPixDelta;
+                    if (eType == ScrollType::Drag)
+                    {
+                        if (nNewThumb > nPrevDragPos && nPixDelta < 0) nPixDelta = 0;
+                        else if (nNewThumb < nPrevDragPos && nPixDelta > 0) nPixDelta = 0;
+                    }
+                    nPrevDragPos = nNewThumb;
+
+                    // Smooth scroll is on here (guaranteed by bSmooth above).
+                    if (nPixDelta != 0)
+                        SmoothScrollX(nPixDelta, eHPLocal);
+                }
+                nDelta = 0;
             }
             break;
     }
 
     if (nDelta)
     {
-        bool bUpdate = ( eType != ScrollType::Drag );    // don't alter the ranges while dragging
-        if ( bHoriz )
-            ScrollX( nDelta, (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT, bUpdate );
-        else
-            ScrollY( nDelta, (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM, bUpdate );
-    }
+        // nDelta is in cells (LineUp/Down/Page cases).
+        // When smooth scrolling is disabled, dispatch directly to the cell-granular
+        // ScrollX/Y so that PageUp/Down moves the correct number of rows/columns.
+        // (The SmoothScrollX/Y fallback only ever scrolls ±1 cell, which is wrong
+        // for page-granular events.)
+        if (!bSmooth)
+        {
+            // Don't alter the scrollbar ranges while dragging (master behaviour);
+            // EndScrollHdl re-syncs them when the drag ends.  This avoids the thumb
+            // jumping mid-drag on sheets whose scroll range grows as new rows appear.
+            const bool bUpd = (eType != ScrollType::Drag);
+            if (bHoriz)
+                ScrollX(nDelta, (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT, bUpd);
+            else
+                ScrollY(nDelta, (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM, bUpd);
+            return;
+        }
 
-    // tdf#161945 update horizontal scrollbar position to match tab view
-    // While the fix for tdf#135478 reduces the horizontal scroll delta
-    // applied to the tab view, the horizontal scrollbar is set before
-    // that with the original delta. As a result, the horizontal scrollbar
-    // is now mispositioned so update the horizontal scrollbar position
-    // to match the position of the tab view's visible columns.
-    if ( bUpdateHorizontalScrollbars )
-        UpdateScrollBars( COLUMN_HEADER );
+        // Convert cell-granular delta to pixels using the actual row/column pixel heights
+        // of the rows/columns to be crossed.  Using only the top row's height (nDelta *
+        // topRowPx) produces the wrong scroll distance when rows have variable heights.
+        if ( bHoriz )
+        {
+            ScHSplitPos eHPFinal = (pScroll == aHScrollLeft.get()) ? SC_SPLIT_LEFT : SC_SPLIT_RIGHT;
+            SCTAB nTabFinal = aViewData.CurrentTabForData();
+            ScDocument& rDocFinal = aViewData.GetDocument();
+            SCCOL nPosXFinal = aViewData.GetPosX(eHPFinal);
+            double nPPTXFinal = aViewData.GetPPTX();
+
+            SCCOL nColStart = (nDelta > 0) ? nPosXFinal : std::max<SCCOL>(0, nPosXFinal + static_cast<SCCOL>(nDelta));
+            SCCOL nColEnd   = (nDelta > 0) ? std::min<SCCOL>(nPosXFinal + static_cast<SCCOL>(nDelta) - 1, rDocFinal.MaxCol())
+                                           : nPosXFinal - 1;
+            tools::Long nPixFinal = std::max(1L, lcl_GetScaledColWidthPx(
+                rDocFinal, nPPTXFinal, nColStart, nColEnd, nTabFinal));
+            if (nDelta < 0) nPixFinal = -nPixFinal;
+            if (bLayoutRTL) nPixFinal = -nPixFinal;
+            SmoothScrollX(nPixFinal, eHPFinal);
+        }
+        else
+        {
+            ScVSplitPos eVPFinal = (pScroll == aVScrollTop.get()) ? SC_SPLIT_TOP : SC_SPLIT_BOTTOM;
+            SCTAB nTabFinal = aViewData.CurrentTabForData();
+            ScDocument& rDocFinal = aViewData.GetDocument();
+            SCROW nPosYFinal = aViewData.GetPosY(eVPFinal);
+
+            // Sum heights of the rows that will be crossed.
+            SCROW nRowStart = (nDelta > 0) ? nPosYFinal : std::max<SCROW>(0, nPosYFinal + static_cast<SCROW>(nDelta));
+            SCROW nRowEnd   = (nDelta > 0) ? std::min<SCROW>(nPosYFinal + static_cast<SCROW>(nDelta) - 1, rDocFinal.MaxRow())
+                                           : nPosYFinal - 1;
+            tools::Long nPixFinal = 0;
+            if (nRowStart <= nRowEnd)
+                nPixFinal = std::max(1L, rDocFinal.GetScaledRowHeight(nRowStart, nRowEnd, nTabFinal, aViewData.GetPPTY()));
+            if (nDelta < 0) nPixFinal = -nPixFinal;
+            if (nPixFinal != 0)
+                SmoothScrollY(nPixFinal, eVPFinal);
+        }
+    }
 }
 
 void ScTabView::ScrollX( tools::Long nDeltaX, ScHSplitPos eWhich, bool bUpdBars )
@@ -1532,6 +1760,351 @@ void ScTabView::ScrollLines( tools::Long nDeltaX, tools::Long nDeltaY )
         ScrollX(nDeltaX,WhichH(eWhich));
     if (nDeltaY)
         ScrollY(nDeltaY,WhichV(eWhich));
+}
+
+void ScTabView::SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich )
+{
+    SAL_INFO("sc.smooth", "SmoothScrollY: nPixelDelta=" << nPixelDelta << " eWhich=" << static_cast<int>(eWhich));
+
+    if (nPixelDelta == 0)
+        return;
+
+    // Fall back to cell-granular scrolling in tiled rendering mode.
+    if (comphelper::LibreOfficeKit::isActive())
+    {
+        SAL_INFO("sc.smooth", "  -> LOK fallback");
+        ScrollY(nPixelDelta > 0 ? 1 : -1, eWhich);
+        return;
+    }
+    // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
+    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
+    {
+        SAL_INFO("sc.smooth", "  -> smooth scroll disabled, cell-granular fallback");
+        ScrollY(nPixelDelta > 0 ? 1 : -1, eWhich);
+        return;
+    }
+    // The frozen top pane does not scroll.
+    if (aViewData.GetVSplitMode() == SC_SPLIT_FIX && eWhich == SC_SPLIT_TOP)
+    {
+        SAL_INFO("sc.smooth", "  -> frozen top pane, skip");
+        return;
+    }
+
+    ScDocument& rDoc = aViewData.GetDocument();
+    SCTAB nTab = aViewData.CurrentTabForData();
+    double nPPTY = aViewData.GetPPTY();
+
+    tools::Long nCurrentOffset = aViewData.GetPixOffsetY(eWhich);
+    SCROW nPosY = aViewData.GetPosY(eWhich);
+    // In fixed-split bottom pane, never scroll above the freeze position.
+    SCROW nMinPosY = (aViewData.GetVSplitMode() == SC_SPLIT_FIX && eWhich == SC_SPLIT_BOTTOM)
+                     ? aViewData.GetFixPosY() : 0;
+    SAL_INFO("sc.smooth", "  currentOffset=" << nCurrentOffset << " posY=" << nPosY << " nPPTY=" << nPPTY << " nMinPosY=" << nMinPosY);
+
+    // nNewOffset = current sub-cell offset minus delta.
+    // Positive nPixelDelta = scroll down (content moves up), offset becomes more negative.
+    tools::Long nNewOffset = nCurrentOffset - nPixelDelta;
+
+    // Track pixel displacement to detect no-ops (row boundaries crossed + offset change).
+    tools::Long nRowsCrossedPx = 0;
+
+    // Advance rows: nNewOffset went negative past the end of the current top row.
+    while (nNewOffset < 0 && nPosY < rDoc.MaxRow())
+    {
+        // Skip hidden rows.
+        while (nPosY < rDoc.MaxRow() && rDoc.RowHidden(nPosY, nTab))
+            ++nPosY;
+        if (rDoc.RowHidden(nPosY, nTab))
+            break;
+
+        tools::Long nRowPx = ScViewData::ToPixel(
+            sal::static_int_cast<sal_uInt16>(rDoc.GetRowHeight(nPosY, nTab)), nPPTY);
+        if (nRowPx == 0)
+        {
+            ++nPosY;
+            continue;
+        }
+        if (-nNewOffset < nRowPx)
+            break; // offset fits within this row
+
+        nRowsCrossedPx += nRowPx;
+        nNewOffset += nRowPx;
+        ++nPosY;
+    }
+
+    // Retreat rows: nNewOffset is positive, scroll up past cell boundary.
+    while (nNewOffset > 0 && nPosY > nMinPosY)
+    {
+        --nPosY;
+        while (nPosY > nMinPosY && rDoc.RowHidden(nPosY, nTab))
+            --nPosY;
+
+        tools::Long nRowPx = ScViewData::ToPixel(
+            sal::static_int_cast<sal_uInt16>(rDoc.GetRowHeight(nPosY, nTab)), nPPTY);
+        nRowsCrossedPx -= nRowPx;
+        nNewOffset -= nRowPx;
+    }
+
+    // Clamp at top boundary (freeze position for bottom pane, document top otherwise).
+    if (nPosY <= nMinPosY && nNewOffset > 0)
+        nNewOffset = 0;
+    if (nNewOffset > 0)
+        nNewOffset = 0;
+    // Clamp at document bottom.
+    if (nPosY >= rDoc.MaxRow())
+    {
+        nPosY = rDoc.MaxRow();
+        if (nNewOffset < 0)
+            nNewOffset = 0;
+    }
+
+    // Total pixel displacement: row boundaries crossed + sub-cell offset change.
+    // Both must be zero (and nPosY unchanged) for the scroll to be a no-op.
+    // Note: there is no ScrollPixel/blit optimisation here; full Invalidate+PaintImmediately
+    // is always used (see the comment in the paint block below for why blit was abandoned).
+    tools::Long nScrolledPx = nRowsCrossedPx + (nCurrentOffset - nNewOffset);
+
+    if (nScrolledPx == 0 && nPosY == aViewData.GetPosY(eWhich))
+        return;
+
+    HideAllCursors();
+
+    if (nPosY != aViewData.GetPosY(eWhich))
+    {
+        SCROW nUNew = nPosY;
+        UpdateHeaderWidth(&eWhich, &nUNew);
+        aViewData.SetPosY(eWhich, nPosY); // resets nPixOffsetY to 0
+    }
+
+    aViewData.SetPixOffsetY(eWhich, nNewOffset);
+
+    // Refresh overlay objects (cursor, selection, auto-fill handle, etc.) to the new
+    // pixel-offset position BEFORE painting.  Without this, PaintImmediately() would
+    // render the draw layer with stale overlay positions, producing a one-frame cursor
+    // "ghost" that lags the smoothly scrolled grid content by nPixelDelta pixels.
+    UpdateAllOverlays();
+
+    // Reposition the in-cell editor (EditView) to match the new pixel offset.
+    // ScrollPixel() normally does this via UpdateEditViewPos(), but smooth scroll
+    // bypasses ScrollPixel and uses Invalidate+PaintImmediately instead, so we
+    // must call it explicitly here.  Without this the editor widget stays fixed on
+    // screen while the grid scrolls underneath it.
+    if (eWhich == SC_SPLIT_BOTTOM)
+    {
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            pGridWin[SC_SPLIT_BOTTOMLEFT]->UpdateEditViewPos();
+        if (aViewData.GetHSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_BOTTOMRIGHT])
+            pGridWin[SC_SPLIT_BOTTOMRIGHT]->UpdateEditViewPos();
+    }
+    else
+    {
+        if (pGridWin[SC_SPLIT_TOPLEFT])
+            pGridWin[SC_SPLIT_TOPLEFT]->UpdateEditViewPos();
+        if (aViewData.GetHSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_TOPRIGHT])
+            pGridWin[SC_SPLIT_TOPRIGHT]->UpdateEditViewPos();
+    }
+
+    // Full invalidate + synchronous paint.
+    // ScrollPixel blit cannot be used here: cells render in VCL's mm100 coordinate system
+    // whose origin can only approximate pixel positions.  After a pixel-granular blit the
+    // blitted content is positioned by the old MapMode; the freshly-painted strip uses the
+    // new MapMode.  Even a ±1 px mm100 rounding difference causes visible text ghosting
+    // (doubled glyphs) wherever cell text crosses the blit boundary.
+    if (eWhich == SC_SPLIT_BOTTOM)
+    {
+        pGridWin[SC_SPLIT_BOTTOMLEFT]->Invalidate();
+        pGridWin[SC_SPLIT_BOTTOMLEFT]->PaintImmediately();
+        if (aViewData.GetHSplitMode() != SC_SPLIT_NONE)
+        {
+            pGridWin[SC_SPLIT_BOTTOMRIGHT]->Invalidate();
+            pGridWin[SC_SPLIT_BOTTOMRIGHT]->PaintImmediately();
+        }
+    }
+    else
+    {
+        pGridWin[SC_SPLIT_TOPLEFT]->Invalidate();
+        pGridWin[SC_SPLIT_TOPLEFT]->PaintImmediately();
+        if (aViewData.GetHSplitMode() != SC_SPLIT_NONE)
+        {
+            pGridWin[SC_SPLIT_TOPRIGHT]->Invalidate();
+            pGridWin[SC_SPLIT_TOPRIGHT]->PaintImmediately();
+        }
+    }
+    if (pRowBar[eWhich])
+    {
+        pRowBar[eWhich]->Invalidate();
+        pRowBar[eWhich]->PaintImmediately();
+    }
+    if (pRowOutline[eWhich])
+        pRowOutline[eWhich]->Invalidate();
+
+    // During scrollbar drag, skip UpdateScrollBars.  ScrollAdaptor wraps a weld::Scrollbar
+    // (GtkAdjustment).  UpdateScrollBars calls SetScrollBar → adjustment_set_upper(nTotalPxB).
+    // For sheets where nTotalPxB grows as the user scrolls into previously-unvisited rows
+    // (nScrollEndY = max(nUsedY, nPosY) + nVisY + 2), GTK's drag tracking recomputes the
+    // slider pixel position from the new upper bound but its accumulated drag offset does
+    // not reset.  The mismatch causes the visual thumb to jump on every motion event —
+    // the classic drag jitter.  Even on fully populated sheets, adjustment_set_value()
+    // is called with the integer-truncated equivalent of GTK's internal floating-point value,
+    // which may emit a spurious value-changed signal and force a redundant re-entrant
+    // ScrollHdl call.  EndScrollHdl calls UpdateScrollBars() when the drag ends, so the
+    // scrollbar range and thumb are correctly synced at that point.
+    if (!bDragging)
+        UpdateScrollBars(ROW_HEADER);
+    ShowAllCursors();
+    SetNewVisArea();
+    TestHintWindow();
+}
+
+void ScTabView::SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich )
+{
+    if (nPixelDelta == 0)
+        return;
+
+    if (comphelper::LibreOfficeKit::isActive())
+    {
+        ScrollX(nPixelDelta > 0 ? 1 : -1, eWhich);
+        return;
+    }
+    // Fall back to cell-granular scrolling when smooth scrolling is disabled in options.
+    if (!officecfg::Office::Calc::Content::Display::SmoothScroll::get())
+    {
+        ScrollX(nPixelDelta > 0 ? 1 : -1, eWhich);
+        return;
+    }
+    // The frozen left pane does not scroll.
+    if (aViewData.GetHSplitMode() == SC_SPLIT_FIX && eWhich == SC_SPLIT_LEFT)
+        return;
+
+    ScDocument& rDoc = aViewData.GetDocument();
+    SCTAB nTab = aViewData.CurrentTabForData();
+    double nPPTX = aViewData.GetPPTX();
+    bool bLayoutRTL = rDoc.IsLayoutRTL(nTab);
+
+    tools::Long nCurrentOffset = aViewData.GetPixOffsetX(eWhich);
+    SCCOL nPosX = aViewData.GetPosX(eWhich);
+    // In fixed-split right pane, never scroll left of the freeze position.
+    SCCOL nMinPosX = (aViewData.GetHSplitMode() == SC_SPLIT_FIX && eWhich == SC_SPLIT_RIGHT)
+                     ? aViewData.GetFixPosX() : 0;
+
+    tools::Long nEffDelta = bLayoutRTL ? -nPixelDelta : nPixelDelta;
+    tools::Long nNewOffset = nCurrentOffset - nEffDelta;
+    tools::Long nColsCrossedPx = 0;
+
+    // Advance columns.
+    while (nNewOffset < 0 && nPosX < rDoc.MaxCol())
+    {
+        while (nPosX < rDoc.MaxCol() && rDoc.ColHidden(nPosX, nTab))
+            ++nPosX;
+        if (rDoc.ColHidden(nPosX, nTab))
+            break;
+
+        tools::Long nColPx = ScViewData::ToPixel(
+            sal::static_int_cast<sal_uInt16>(rDoc.GetColWidth(nPosX, nTab)), nPPTX);
+        if (nColPx == 0)
+        {
+            ++nPosX;
+            continue;
+        }
+        if (-nNewOffset < nColPx)
+            break;
+
+        nColsCrossedPx += nColPx;
+        nNewOffset += nColPx;
+        ++nPosX;
+    }
+
+    // Retreat columns.
+    while (nNewOffset > 0 && nPosX > nMinPosX)
+    {
+        --nPosX;
+        while (nPosX > nMinPosX && rDoc.ColHidden(nPosX, nTab))
+            --nPosX;
+
+        tools::Long nColPx = ScViewData::ToPixel(
+            sal::static_int_cast<sal_uInt16>(rDoc.GetColWidth(nPosX, nTab)), nPPTX);
+        nColsCrossedPx -= nColPx;
+        nNewOffset -= nColPx;
+    }
+
+    if (nPosX <= nMinPosX && nNewOffset > 0)
+        nNewOffset = 0;
+    if (nNewOffset > 0)
+        nNewOffset = 0;
+    if (nPosX >= rDoc.MaxCol())
+    {
+        nPosX = rDoc.MaxCol();
+        if (nNewOffset < 0)
+            nNewOffset = 0;
+    }
+
+    tools::Long nScrolledPx = nColsCrossedPx + (nCurrentOffset - nNewOffset);
+
+    if (nScrolledPx == 0 && nPosX == aViewData.GetPosX(eWhich))
+        return;
+
+    HideAllCursors();
+
+    if (nPosX != aViewData.GetPosX(eWhich))
+    {
+        aViewData.SetPosX(eWhich, nPosX); // resets nPixOffsetX to 0
+    }
+
+    aViewData.SetPixOffsetX(eWhich, nNewOffset);
+
+    // Refresh overlays to the new pixel-offset position before painting (same reason as SmoothScrollY).
+    UpdateAllOverlays();
+
+    // Reposition the in-cell editor (same reason as SmoothScrollY — see comment there).
+    if (eWhich == SC_SPLIT_LEFT)
+    {
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            pGridWin[SC_SPLIT_BOTTOMLEFT]->UpdateEditViewPos();
+        if (aViewData.GetVSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_TOPLEFT])
+            pGridWin[SC_SPLIT_TOPLEFT]->UpdateEditViewPos();
+    }
+    else
+    {
+        if (pGridWin[SC_SPLIT_BOTTOMRIGHT])
+            pGridWin[SC_SPLIT_BOTTOMRIGHT]->UpdateEditViewPos();
+        if (aViewData.GetVSplitMode() != SC_SPLIT_NONE && pGridWin[SC_SPLIT_TOPRIGHT])
+            pGridWin[SC_SPLIT_TOPRIGHT]->UpdateEditViewPos();
+    }
+
+    if (eWhich == SC_SPLIT_LEFT)
+    {
+        pGridWin[SC_SPLIT_BOTTOMLEFT]->Invalidate();
+        pGridWin[SC_SPLIT_BOTTOMLEFT]->PaintImmediately();
+        if (aViewData.GetVSplitMode() != SC_SPLIT_NONE)
+        {
+            pGridWin[SC_SPLIT_TOPLEFT]->Invalidate();
+            pGridWin[SC_SPLIT_TOPLEFT]->PaintImmediately();
+        }
+    }
+    else
+    {
+        pGridWin[SC_SPLIT_BOTTOMRIGHT]->Invalidate();
+        pGridWin[SC_SPLIT_BOTTOMRIGHT]->PaintImmediately();
+        if (aViewData.GetVSplitMode() != SC_SPLIT_NONE)
+        {
+            pGridWin[SC_SPLIT_TOPRIGHT]->Invalidate();
+            pGridWin[SC_SPLIT_TOPRIGHT]->PaintImmediately();
+        }
+    }
+    if (pColBar[eWhich])
+    {
+        pColBar[eWhich]->Invalidate();
+        pColBar[eWhich]->PaintImmediately();
+    }
+    if (pColOutline[eWhich])
+        pColOutline[eWhich]->Invalidate();
+
+    // Same drag-jitter fix as SmoothScrollY: see comment there for the full explanation.
+    if (!bDragging)
+        UpdateScrollBars(COLUMN_HEADER);
+    ShowAllCursors();
+    SetNewVisArea();
+    TestHintWindow();
 }
 
 namespace

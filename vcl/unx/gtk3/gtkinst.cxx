@@ -8644,7 +8644,16 @@ public:
 
     virtual void adjustment_set_page_size(int size) override
     {
+        // Block the value-changed signal while updating page_size.
+        // gtk_adjustment_set_page_size() may clamp the current value to
+        // [lower, upper - page_size] and emit value-changed synchronously.
+        // Without blocking, that emission re-enters our scroll handler
+        // before the subsequent adjustment_set_value() can set the correct
+        // thumb position, producing a spurious backward-scroll event that
+        // causes visible jitter (most pronounced on the horizontal bar).
+        disable_notify_events();
         gtk_adjustment_set_page_size(m_pAdjustment, size);
+        enable_notify_events();
     }
 
     virtual int adjustment_get_page_increment() const override

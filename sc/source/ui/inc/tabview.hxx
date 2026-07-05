@@ -212,10 +212,16 @@ private:
     bool                bBlockRows:1;             // are whole rows selected?
     bool                mbInlineWithScrollbar:1;  // should inline with scrollbar?
 
+    bool                bScrollHandlerActive;     // re-entrancy guard for ScrollHdl (plain bool: must be referenceable)
+
     double              mfLastZoomScale = 0;
     double              mfAccumulatedZoom = 0;
-    tools::Long         mnPendingaHScrollLeftDelta = 0;
-    tools::Long         mnPendingaHScrollRightDelta = 0;
+    // Smooth scrolling: cumulative pan gesture offsets (for delta computation per Update event)
+    double              mfPreviousPanOffsetX = 0.0;
+    double              mfPreviousPanOffsetY = 0.0;
+
+    void            SmoothScrollX( tools::Long nPixelDelta, ScHSplitPos eWhich );
+    void            SmoothScrollY( tools::Long nPixelDelta, ScVSplitPos eWhich );
 
     void            Init();
 

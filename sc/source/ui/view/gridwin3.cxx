@@ -341,6 +341,11 @@ MapMode ScGridWindow::GetDrawMapMode( bool bForce )
     }
     aDrawMode.SetOrigin(Point());
     Point aStartPos = mrViewData.GetPixPos(eWhich);
+    // Include sub-cell pixel offset so draw-layer objects (shapes, overlays) stay aligned
+    // with smoothly-scrolled cell content.  GetPixPos() returns the cell-boundary pixel
+    // position; adding nPixOffset shifts it by the fractional-row/col scroll amount.
+    aStartPos.AdjustX(mrViewData.GetPixOffsetX(WhichH(eWhich)));
+    aStartPos.AdjustY(mrViewData.GetPixOffsetY(WhichV(eWhich)));
     if ( bNegativePage )
     {
         //  RTL uses negative positions for drawing objects

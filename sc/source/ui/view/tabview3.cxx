@@ -3176,7 +3176,7 @@ void ScTabView::PaintTopArea( SCCOL nStartCol, SCCOL nEndCol )
 
     if ( nStartCol < aViewData.GetPosX(SC_SPLIT_LEFT) ||
          nStartCol < aViewData.GetPosX(SC_SPLIT_RIGHT) )
-        aViewData.RecalcPixPos();
+        aViewData.RecalcPixPos(/*bResetSubCellOffsets=*/false);
 
         // adjust freeze (UpdateFixX resets HSplitPos)
 
@@ -3234,7 +3234,7 @@ void ScTabView::PaintLeftArea( SCROW nStartRow, SCROW nEndRow )
 
     if ( nStartRow < aViewData.GetPosY(SC_SPLIT_TOP) ||
          nStartRow < aViewData.GetPosY(SC_SPLIT_BOTTOM) )
-        aViewData.RecalcPixPos();
+        aViewData.RecalcPixPos(/*bResetSubCellOffsets=*/false);
 
         // adjust freeze (UpdateFixY reset VSplitPos)
 

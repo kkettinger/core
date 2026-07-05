@@ -160,6 +160,14 @@
           </info>
           <value>false</value>
         </prop>
+        <prop oor:name="SmoothScroll" oor:type="xs:boolean" oor:nillable="false">
+          <!-- UIHints: Tools - Options -Spreadsheets - View - [Section] Visual Aids -->
+          <info>
+            <desc>Enables pixel-level smooth scrolling in Calc spreadsheets (tdf#40917).</desc>
+            <label>Smooth scrolling</label>
+          </info>
+          <value>true</value>
+        </prop>
         <prop oor:name="Anchor" oor:type="xs:boolean" oor:nillable="false">
           <!-- UIHints: Tools - Options -Spreadsheets - Contents - [Section] Display -->
           <info>

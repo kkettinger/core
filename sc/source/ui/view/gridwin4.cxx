@@ -420,6 +420,9 @@ void ScGridWindow::Paint( vcl::RenderContext& /*rRenderContext*/, const tools::R
         ++nX1;
         nScrX += ScViewData::ToPixel( rDoc.GetColWidth( nX1, nTab ), nPPTX );
     }
+    // Adjust for sub-cell horizontal offset so the nX2 range correctly covers the
+    // rightmost partially-visible column when the leftmost column is partially scrolled.
+    nScrX += mrViewData.GetPixOffsetX(eHWhich);  // nPixOffsetX ≤ 0
     SCCOL nX2 = nX1;
     while ( nScrX <= aMirroredPixel.Right() && nX2 < rDoc.MaxCol() )
     {
@@ -427,7 +430,11 @@ void ScGridWindow::Paint( vcl::RenderContext& /*rRenderContext*/, const tools::R
         nScrX += ScViewData::ToPixel( rDoc.GetColWidth( nX2, nTab ), nPPTX );
     }
 
-    tools::Long nScrY = 0;
+    // Start accumulation from the sub-cell pixel offset so AddPixelsWhile
+    // correctly identifies which rows cover any given clip rectangle.
+    // Without this, when nPixOffsetY < 0 the post-loop nScrY is too large,
+    // the nY2 range check fires too early, and the exposed strip is clipped short.
+    tools::Long nScrY = mrViewData.GetPixOffsetY(eVWhich);
     ScViewData::AddPixelsWhile( nScrY, aPixRect.Top(), nY1, rDoc.MaxRow(), nPPTY, &rDoc, nTab);
     SCROW nY2 = nY1;
     if (nScrY <= aPixRect.Bottom() && nY2 < rDoc.MaxRow())
@@ -509,7 +516,6 @@ void ScGridWindow::Draw( SCCOL nX1, SCROW nY1, SCCOL nX2, SCROW nY2, ScUpdateMod
 
     tools::Long nScrX = aScrPos.X();
     tools::Long nScrY = aScrPos.Y();
-
     SCCOL nCurX = mrViewData.GetCurX();
     SCROW nCurY = mrViewData.GetCurY();
     SCCOL nCurEndX = nCurX;

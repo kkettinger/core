@@ -31,6 +31,8 @@
 #include <LibreOfficeKit/LibreOfficeKitEnums.h>
 #include <tools/json_writer.hxx>
 #include <output.hxx>
+#include <comphelper/lok.hxx>
+#include <officecfg/Office/Calc.hxx>
 
 // ---  Referenz-Eingabe / Fill-Cursor
 
@@ -439,13 +441,15 @@ tools::Long ScTabView::GetScrollBarPos( const ScrollAdaptor& rScroll, bool bLayo
 }
 
 //  UpdateScrollBars - set visible area and scroll width of scroll bars
-static tools::Long lcl_UpdateBar( ScrollAdaptor& rScroll, SCCOLROW nSize )        // Size = (complete) cells
+// nPageSizePx: visible page size in pixels (pixel-proportional scrollbars) or cells (legacy).
+// Returns the thumb-position correction that should be applied as an additional scroll step.
+static tools::Long lcl_UpdateBar( ScrollAdaptor& rScroll, tools::Long nPageSizePx )
 {
     tools::Long nOldPos;
     tools::Long nNewPos;
 
     nOldPos = rScroll.GetThumbPos();
-    rScroll.SetPageSize( static_cast<tools::Long>(nSize) );
+    rScroll.SetPageSize( nPageSizePx );
     nNewPos = rScroll.GetThumbPos();
 #ifndef UNX
     rScroll.SetPageSize( 1 );               // always possible !
@@ -467,9 +471,25 @@ static tools::Long lcl_GetScrollRange( SCCOLROW nDocEnd, SCCOLROW nPos, SCCOLROW
     return ( nEnd - nStart );       // for range starting at 0
 }
 
+// Cumulative column pixel width from nStartCol to nEndCol inclusive.
+static tools::Long lcl_GetScaledColWidth(
+    ScDocument& rDoc, SCCOL nStartCol, SCCOL nEndCol, SCTAB nTab, double nPPTX)
+{
+    tools::Long nTotal = 0;
+    for (SCCOL c = nStartCol; c <= nEndCol; ++c)
+        nTotal += ScViewData::ToPixel(rDoc.GetColWidth(c, nTab), nPPTX);
+    return nTotal;
+}
+
 void ScTabView::UpdateScrollBars( HeaderType eHeaderType )
 {
     ScTabViewShell::notifyAllViewsHeaderInvalidation(GetViewData().GetViewShell(), eHeaderType, GetViewData().GetTabNumber());
+
+    // Pixel-proportional scrollbars are only used when smooth scrolling is enabled.
+    // When disabled (or under tiled rendering) the scrollbars stay cell-granular, so
+    // the toggle fully restores the pre-feature scrollbar behaviour.
+    const bool bSmoothScroll = !comphelper::LibreOfficeKit::isActive()
+        && officecfg::Office::Calc::Content::Display::SmoothScroll::get();
 
     tools::Long        nDiff;
     bool        bTop =   ( aViewData.GetVSplitMode() != SC_SPLIT_NONE );
@@ -494,43 +514,266 @@ void ScTabView::UpdateScrollBars( HeaderType eHeaderType )
         nStartY = aViewData.GetFixPosY();
 
     nVisXL = aViewData.VisibleCellsX( SC_SPLIT_LEFT );
-    tools::Long nMaxXL = lcl_GetScrollRange( nUsedX, aViewData.GetPosX(SC_SPLIT_LEFT), nVisXL, rDoc.MaxCol(), 0 );
-    SetScrollBar( *aHScrollLeft, nMaxXL, nVisXL, aViewData.GetPosX( SC_SPLIT_LEFT ), bLayoutRTL );
+    if (bSmoothScroll)
+    {
+        // Pixel-proportional horizontal scrollbar: 1 thumb unit = 1 document pixel.
+        // Wide columns occupy proportionally more thumb range → uniform scroll speed.
+        SCCOL nPosXL = aViewData.GetPosX(SC_SPLIT_LEFT);
+        tools::Long nOffXL = aViewData.GetPixOffsetX(SC_SPLIT_LEFT);
+        tools::Long nColPxL = std::max(1L, aViewData.ToPixel(
+            rDoc.GetColWidth(nPosXL, nTab), aViewData.GetPPTX()));
+
+        SCCOL nScrollEndXL = std::min(
+            std::max(static_cast<SCCOL>(nUsedX + nVisXL + 2),
+                     static_cast<SCCOL>(nPosXL + nVisXL + 2)),
+            rDoc.MaxCol());
+        tools::Long nTotalPxL = lcl_GetScaledColWidth(rDoc, nStartX, nScrollEndXL, nTab,
+                                                      aViewData.GetPPTX());
+
+        tools::Long nThumbL = (nPosXL > nStartX)
+            ? lcl_GetScaledColWidth(rDoc, nStartX, nPosXL - 1, nTab, aViewData.GetPPTX())
+            : 0;
+        nThumbL += (-nOffXL);
+
+        tools::Long nVisPixL = 0;
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            nVisPixL = pGridWin[SC_SPLIT_BOTTOMLEFT]->GetOutputSizePixel().Width();
+        if (nVisPixL <= 0)
+            nVisPixL = nVisXL * nColPxL;
+
+        SetScrollBar(*aHScrollLeft, nTotalPxL, nVisPixL, nThumbL, bLayoutRTL);
+        aHScrollLeft->SetLineSize(nColPxL);
+    }
+    else
+    {
+        // Cell-granular scrollbar (master behaviour): 1 thumb unit = 1 column.
+        tools::Long nMaxXL = lcl_GetScrollRange( nUsedX, aViewData.GetPosX(SC_SPLIT_LEFT), nVisXL, rDoc.MaxCol(), 0 );
+        SetScrollBar( *aHScrollLeft, nMaxXL, nVisXL, aViewData.GetPosX( SC_SPLIT_LEFT ), bLayoutRTL );
+        aHScrollLeft->SetLineSize( 1 );
+    }
 
     nVisYB = aViewData.VisibleCellsY( SC_SPLIT_BOTTOM );
-    tools::Long nMaxYB = lcl_GetScrollRange( nUsedY, aViewData.GetPosY(SC_SPLIT_BOTTOM), nVisYB, rDoc.MaxRow(), nStartY );
-    SetScrollBar( *aVScrollBottom, nMaxYB, nVisYB, aViewData.GetPosY( SC_SPLIT_BOTTOM ) - nStartY, false );
+    if (bSmoothScroll)
+    {
+        // Pixel-proportional vertical scrollbar: 1 thumb unit = 1 pixel of document height.
+        // Large rows occupy proportionally more thumb range → uniform scroll speed.
+        SCROW nPosYB = aViewData.GetPosY(SC_SPLIT_BOTTOM);
+        tools::Long nOffYB = aViewData.GetPixOffsetY(SC_SPLIT_BOTTOM);
+        tools::Long nRowPxB = std::max(1L, aViewData.ToPixel(
+            rDoc.GetRowHeight(nPosYB, nTab), aViewData.GetPPTY()));
+
+        // Limit range to used rows + buffer (mirrors lcl_GetScrollRange logic in pixels
+        // so the thumb stays a usable size on sheets with little data).
+        SCROW nScrollEndY = std::min(
+            std::max(static_cast<SCROW>(nUsedY + nVisYB + 2),
+                     static_cast<SCROW>(nPosYB + nVisYB + 2)),
+            rDoc.MaxRow());
+        tools::Long nTotalPxB = rDoc.GetScaledRowHeight(nStartY, nScrollEndY, nTab,
+                                                        aViewData.GetPPTY());
+
+        // Thumb = cumulative pixel height from nStartY to top-of-viewport.
+        tools::Long nThumbB = (nPosYB > nStartY)
+            ? rDoc.GetScaledRowHeight(nStartY, nPosYB - 1, nTab, aViewData.GetPPTY())
+            : 0;
+        nThumbB += (-nOffYB);  // nOffYB ≤ 0
+
+        // Visible page size = actual grid window height. Using nVisYB×currentRowHeight
+        // balloons when a large row is at the top, clamping the thumb and causing
+        // lcl_UpdateBar to fire a spurious scroll-back via SmoothScrollY.
+        tools::Long nVisPixB = 0;
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            nVisPixB = pGridWin[SC_SPLIT_BOTTOMLEFT]->GetOutputSizePixel().Height();
+        if (nVisPixB <= 0)
+            nVisPixB = nVisYB * nRowPxB;  // fallback during early init
+
+        SetScrollBar(*aVScrollBottom, nTotalPxB, nVisPixB, nThumbB, false);
+        aVScrollBottom->SetLineSize(nRowPxB);
+    }
+    else
+    {
+        // Cell-granular scrollbar (master behaviour): 1 thumb unit = 1 row.
+        tools::Long nMaxYB = lcl_GetScrollRange( nUsedY, aViewData.GetPosY(SC_SPLIT_BOTTOM), nVisYB, rDoc.MaxRow(), nStartY );
+        SetScrollBar( *aVScrollBottom, nMaxYB, nVisYB, aViewData.GetPosY( SC_SPLIT_BOTTOM ) - nStartY, false );
+        aVScrollBottom->SetLineSize( 1 );
+    }
 
     if (bRight)
     {
         nVisXR = aViewData.VisibleCellsX( SC_SPLIT_RIGHT );
-        tools::Long nMaxXR = lcl_GetScrollRange( nUsedX, aViewData.GetPosX(SC_SPLIT_RIGHT), nVisXR, rDoc.MaxCol(), nStartX );
-        SetScrollBar( *aHScrollRight, nMaxXR, nVisXR, aViewData.GetPosX( SC_SPLIT_RIGHT ) - nStartX, bLayoutRTL );
+        if (bSmoothScroll)
+        {
+            SCCOL nPosXR = aViewData.GetPosX(SC_SPLIT_RIGHT);
+            tools::Long nOffXR = aViewData.GetPixOffsetX(SC_SPLIT_RIGHT);
+            tools::Long nColPxR = std::max(1L, aViewData.ToPixel(
+                rDoc.GetColWidth(nPosXR, nTab), aViewData.GetPPTX()));
+
+            SCCOL nScrollEndXR = std::min(
+                std::max(static_cast<SCCOL>(nUsedX + nVisXR + 2),
+                         static_cast<SCCOL>(nPosXR + nVisXR + 2)),
+                rDoc.MaxCol());
+            tools::Long nTotalPxR = (nScrollEndXR >= nStartX)
+                ? lcl_GetScaledColWidth(rDoc, nStartX, nScrollEndXR, nTab, aViewData.GetPPTX())
+                : 0;
+
+            tools::Long nThumbR = (nPosXR > nStartX)
+                ? lcl_GetScaledColWidth(rDoc, nStartX, nPosXR - 1, nTab, aViewData.GetPPTX())
+                : 0;
+            nThumbR += (-nOffXR);
+
+            tools::Long nVisPixR = 0;
+            if (pGridWin[SC_SPLIT_BOTTOMRIGHT])
+                nVisPixR = pGridWin[SC_SPLIT_BOTTOMRIGHT]->GetOutputSizePixel().Width();
+            if (nVisPixR <= 0)
+                nVisPixR = nVisXR * nColPxR;
+
+            SetScrollBar(*aHScrollRight, nTotalPxR, nVisPixR, nThumbR, bLayoutRTL);
+            aHScrollRight->SetLineSize(nColPxR);
+        }
+        else
+        {
+            // Cell-granular scrollbar (master behaviour): 1 thumb unit = 1 column.
+            tools::Long nMaxXR = lcl_GetScrollRange( nUsedX, aViewData.GetPosX(SC_SPLIT_RIGHT), nVisXR, rDoc.MaxCol(), nStartX );
+            SetScrollBar( *aHScrollRight, nMaxXR, nVisXR, aViewData.GetPosX( SC_SPLIT_RIGHT ) - nStartX, bLayoutRTL );
+            aHScrollRight->SetLineSize( 1 );
+        }
     }
 
     if (bTop)
     {
         nVisYT = aViewData.VisibleCellsY( SC_SPLIT_TOP );
-        tools::Long nMaxYT = lcl_GetScrollRange( nUsedY, aViewData.GetPosY(SC_SPLIT_TOP), nVisYT, rDoc.MaxRow(), 0 );
-        SetScrollBar( *aVScrollTop, nMaxYT, nVisYT, aViewData.GetPosY( SC_SPLIT_TOP ), false );
+        if (bSmoothScroll)
+        {
+            // Pixel-proportional vertical scrollbar for the top pane of a movable
+            // (SC_SPLIT_NORMAL) split.  The top pane always starts at row 0 — freeze
+            // mode (SC_SPLIT_FIX) gives aVScrollTop zero height, so it is never used
+            // there — hence nStart is 0 for this bar.
+            SCROW nPosYT = aViewData.GetPosY(SC_SPLIT_TOP);
+            tools::Long nOffYT = aViewData.GetPixOffsetY(SC_SPLIT_TOP);
+            tools::Long nRowPxT = std::max(1L, aViewData.ToPixel(
+                rDoc.GetRowHeight(nPosYT, nTab), aViewData.GetPPTY()));
+
+            SCROW nScrollEndYT = std::min(
+                std::max(static_cast<SCROW>(nUsedY + nVisYT + 2),
+                         static_cast<SCROW>(nPosYT + nVisYT + 2)),
+                rDoc.MaxRow());
+            tools::Long nTotalPxT = rDoc.GetScaledRowHeight(0, nScrollEndYT, nTab,
+                                                            aViewData.GetPPTY());
+
+            tools::Long nThumbT = (nPosYT > 0)
+                ? rDoc.GetScaledRowHeight(0, nPosYT - 1, nTab, aViewData.GetPPTY())
+                : 0;
+            nThumbT += (-nOffYT);  // nOffYT ≤ 0
+
+            tools::Long nVisPixT = 0;
+            if (pGridWin[SC_SPLIT_TOPLEFT])
+                nVisPixT = pGridWin[SC_SPLIT_TOPLEFT]->GetOutputSizePixel().Height();
+            if (nVisPixT <= 0)
+                nVisPixT = nVisYT * nRowPxT;
+
+            SetScrollBar(*aVScrollTop, nTotalPxT, nVisPixT, nThumbT, false);
+            aVScrollTop->SetLineSize(nRowPxT);
+        }
+        else
+        {
+            tools::Long nMaxYT = lcl_GetScrollRange( nUsedY, aViewData.GetPosY(SC_SPLIT_TOP), nVisYT, rDoc.MaxRow(), 0 );
+            SetScrollBar( *aVScrollTop, nMaxYT, nVisYT, aViewData.GetPosY( SC_SPLIT_TOP ), false );
+            aVScrollTop->SetLineSize( 1 );
+        }
     }
 
     //      test the range
 
-    nDiff = lcl_UpdateBar( *aHScrollLeft, nVisXL );
-    if (nDiff) ScrollX( nDiff, SC_SPLIT_LEFT );
+    if (bSmoothScroll)
+    {
+        tools::Long nVisPixL2 = 0;
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            nVisPixL2 = pGridWin[SC_SPLIT_BOTTOMLEFT]->GetOutputSizePixel().Width();
+        if (nVisPixL2 <= 0)
+        {
+            SCCOL nPosXL2 = aViewData.GetPosX(SC_SPLIT_LEFT);
+            tools::Long nColPxL2 = std::max(1L, aViewData.ToPixel(
+                rDoc.GetColWidth(nPosXL2, nTab), aViewData.GetPPTX()));
+            nVisPixL2 = nVisXL * nColPxL2;
+        }
+        nDiff = lcl_UpdateBar(*aHScrollLeft, nVisPixL2);
+        if (nDiff != 0)
+            SmoothScrollX(nDiff, SC_SPLIT_LEFT);
+    }
+    else
+    {
+        nDiff = lcl_UpdateBar( *aHScrollLeft, nVisXL );
+        if (nDiff) ScrollX( nDiff, SC_SPLIT_LEFT );
+    }
     if (bRight)
     {
-        nDiff = lcl_UpdateBar( *aHScrollRight, nVisXR );
-        if (nDiff) ScrollX( nDiff, SC_SPLIT_RIGHT );
+        if (bSmoothScroll)
+        {
+            tools::Long nVisPixR2 = 0;
+            if (pGridWin[SC_SPLIT_BOTTOMRIGHT])
+                nVisPixR2 = pGridWin[SC_SPLIT_BOTTOMRIGHT]->GetOutputSizePixel().Width();
+            if (nVisPixR2 <= 0)
+            {
+                SCCOL nPosXR2 = aViewData.GetPosX(SC_SPLIT_RIGHT);
+                tools::Long nColPxR2 = std::max(1L, aViewData.ToPixel(
+                    rDoc.GetColWidth(nPosXR2, nTab), aViewData.GetPPTX()));
+                nVisPixR2 = nVisXR * nColPxR2;
+            }
+            nDiff = lcl_UpdateBar(*aHScrollRight, nVisPixR2);
+            if (nDiff != 0)
+                SmoothScrollX(nDiff, SC_SPLIT_RIGHT);
+        }
+        else
+        {
+            nDiff = lcl_UpdateBar( *aHScrollRight, nVisXR );
+            if (nDiff) ScrollX( nDiff, SC_SPLIT_RIGHT );
+        }
     }
 
-    nDiff = lcl_UpdateBar( *aVScrollBottom, nVisYB );
-    if (nDiff) ScrollY( nDiff, SC_SPLIT_BOTTOM );
+    if (bSmoothScroll)
+    {
+        // Same actual-height page size as in the SetScrollBar call above.
+        tools::Long nVisPixB2 = 0;
+        if (pGridWin[SC_SPLIT_BOTTOMLEFT])
+            nVisPixB2 = pGridWin[SC_SPLIT_BOTTOMLEFT]->GetOutputSizePixel().Height();
+        if (nVisPixB2 <= 0)
+        {
+            SCROW nPosYB2 = aViewData.GetPosY(SC_SPLIT_BOTTOM);
+            tools::Long nRowPxB2 = std::max(1L, aViewData.ToPixel(
+                rDoc.GetRowHeight(nPosYB2, nTab), aViewData.GetPPTY()));
+            nVisPixB2 = nVisYB * nRowPxB2;
+        }
+        nDiff = lcl_UpdateBar(*aVScrollBottom, nVisPixB2);
+        if (nDiff != 0)
+            SmoothScrollY(nDiff, SC_SPLIT_BOTTOM);
+    }
+    else
+    {
+        nDiff = lcl_UpdateBar( *aVScrollBottom, nVisYB );
+        if (nDiff) ScrollY( nDiff, SC_SPLIT_BOTTOM );
+    }
     if (bTop)
     {
-        nDiff = lcl_UpdateBar( *aVScrollTop, nVisYT );
-        if (nDiff) ScrollY( nDiff, SC_SPLIT_TOP );
+        if (bSmoothScroll)
+        {
+            tools::Long nVisPixT2 = 0;
+            if (pGridWin[SC_SPLIT_TOPLEFT])
+                nVisPixT2 = pGridWin[SC_SPLIT_TOPLEFT]->GetOutputSizePixel().Height();
+            if (nVisPixT2 <= 0)
+            {
+                SCROW nPosYT2 = aViewData.GetPosY(SC_SPLIT_TOP);
+                tools::Long nRowPxT2 = std::max(1L, aViewData.ToPixel(
+                    rDoc.GetRowHeight(nPosYT2, nTab), aViewData.GetPPTY()));
+                nVisPixT2 = nVisYT * nRowPxT2;
+            }
+            nDiff = lcl_UpdateBar(*aVScrollTop, nVisPixT2);
+            if (nDiff != 0)
+                SmoothScrollY(nDiff, SC_SPLIT_TOP);
+        }
+        else
+        {
+            nDiff = lcl_UpdateBar( *aVScrollTop, nVisYT );
+            if (nDiff) ScrollY( nDiff, SC_SPLIT_TOP );
+        }
     }
 
     //      set visible area for online spelling
